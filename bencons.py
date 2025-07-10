@@ -28,17 +28,23 @@ class BeaconDelegate(DefaultDelegate):
         # Parse beacon data and update triangulation
         try:
             user_id, rssi = triangulation.parse_beacon_data(data_str)
-            triangulation.update_rssi(user_id, self.beacon_mac, rssi)
             
-            # Calculate and display user position
-            position = triangulation.get_user_position(user_id)
-            if position:
-                print(f"[{timestamp}] User {user_id} position: X={position['x']}, Y={position['y']} (Confidence: {position['confidence']}%)")
+            # Update RSSI and get position if there's significant change
+            position_info = triangulation.update_rssi(user_id, self.beacon_mac, rssi)
+            
+            if position_info:
+                # Position was updated due to significant change
+                print(f"[{timestamp}] 🎯 User {user_id} NEW POSITION: X={position_info['x']}, Y={position_info['y']}")
+                print(f"    └─ Using {position_info['beacons_used']} beacons:")
+                for beacon in position_info['closest_beacons']:
+                    print(f"       • {beacon['mac']}: {beacon['distance']}m (RSSI: {beacon['rssi']})")
             else:
-                # Show debug info when position calculation fails
-                debug_info = triangulation.get_debug_info(user_id)
-                beacons_with_data = len([b for b in debug_info['beacons_data'].values() if b['avg_rssi'] is not None])
-                print(f"[{timestamp}] User {user_id}: Need 3 beacons, have {beacons_with_data}/3")
+                # No position update (no significant change or insufficient beacons)
+                user_status = triangulation.get_user_status(user_id)
+                if user_status and not user_status['can_calculate']:
+                    print(f"[{timestamp}] User {user_id}: Collecting data... ({user_status['beacon_count']}/3 beacons)")
+                else:
+                    print(f"[{timestamp}] User {user_id}: No significant change detected")
                 
         except ValueError as e:
             print(f"[{timestamp}] Error parsing data: {e}")
@@ -123,6 +129,9 @@ def main():
     
     try:
         print("\nAll beacons connected. Press Ctrl+C to stop...")
+        print("🔍 Monitoring users... Position will be calculated when:")
+        print("   • User detected by at least 3 beacons")
+        print("   • Significant movement detected (>0.5m distance change)")
         print("=" * 60)
         
         # Keep the main thread alive

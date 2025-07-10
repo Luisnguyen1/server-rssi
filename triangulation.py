@@ -2,6 +2,210 @@ import math
 import json
 from typing import Dict, List, Tuple, Optional
 
+class User:
+    def __init__(self, user_id: str):
+        """
+        Initialize a user with their ID
+        
+        Args:
+            user_id: Unique identifier for the user
+        """
+        self.user_id = user_id
+        self.beacon_data = {}  # {beacon_mac: {'rssi': rssi, 'distance': distance}}
+        self.last_position = None  # Last calculated position
+        self.position_history = []  # History of positions
+        
+    def update_beacon_rssi(self, beacon_mac: str, rssi: int, beacon_position: Tuple[float, float]) -> bool:
+        """
+        Update RSSI for a beacon and check if position should be recalculated
+        
+        Args:
+            beacon_mac: MAC address of the beacon
+            rssi: New RSSI value
+            beacon_position: (x, y) position of the beacon
+            
+        Returns:
+            True if there's a significant change requiring position update
+        """
+        # Convert RSSI to distance
+        distance = self._rssi_to_distance(rssi)
+        
+        # Check if this is a new beacon or if there's significant change
+        is_new_beacon = beacon_mac not in self.beacon_data
+        significant_change = False
+        
+        if not is_new_beacon:
+            old_distance = self.beacon_data[beacon_mac]['distance']
+            # Consider significant if distance changes by more than 0.5 meters
+            significant_change = abs(distance - old_distance) > 0.5
+        
+        # Update beacon data
+        self.beacon_data[beacon_mac] = {
+            'rssi': rssi,
+            'distance': distance,
+            'position': beacon_position
+        }
+        
+        return is_new_beacon or significant_change
+    
+    def _rssi_to_distance(self, rssi: int, tx_power: int = -59) -> float:
+        """
+        Convert RSSI to distance estimate using logarithmic path loss model
+        
+        Args:
+            rssi: Received Signal Strength Indicator
+            tx_power: Transmit power at 1 meter (default -59 dBm)
+            
+        Returns:
+            Estimated distance in meters
+        """
+        if rssi == 0:
+            return -1.0
+        
+        ratio = tx_power * 1.0 / rssi
+        if ratio < 1.0:
+            return math.pow(ratio, 10)
+        else:
+            accuracy = (0.89976) * math.pow(ratio, 7.7095) + 0.111
+            return accuracy
+    
+    def get_closest_beacons(self, count: int = 3) -> List[Tuple[str, Dict]]:
+        """
+        Get the closest beacons sorted by distance
+        
+        Args:
+            count: Number of closest beacons to return
+            
+        Returns:
+            List of (beacon_mac, beacon_data) tuples sorted by distance
+        """
+        if not self.beacon_data:
+            return []
+        
+        # Sort beacons by distance
+        sorted_beacons = sorted(
+            self.beacon_data.items(),
+            key=lambda x: x[1]['distance']
+        )
+        
+        return sorted_beacons[:count]
+    
+    def can_calculate_position(self) -> bool:
+        """
+        Check if we have enough beacons to calculate position
+        
+        Returns:
+            True if we have at least 3 beacons
+        """
+        return len(self.beacon_data) >= 3
+    
+    def calculate_position(self) -> Optional[Tuple[float, float]]:
+        """
+        Calculate user position using trilateration with 3 closest beacons
+        
+        Returns:
+            Tuple of (x, y) coordinates or None if insufficient data
+        """
+        if not self.can_calculate_position():
+            return None
+        
+        # Get 3 closest beacons
+        closest_beacons = self.get_closest_beacons(3)
+        
+        # Extract coordinates and distances
+        beacon1_mac, beacon1_data = closest_beacons[0]
+        beacon2_mac, beacon2_data = closest_beacons[1]
+        beacon3_mac, beacon3_data = closest_beacons[2]
+        
+        x1, y1 = beacon1_data['position']
+        x2, y2 = beacon2_data['position']
+        x3, y3 = beacon3_data['position']
+        
+        r1 = beacon1_data['distance']
+        r2 = beacon2_data['distance']
+        r3 = beacon3_data['distance']
+        
+        # Trilateration calculation
+        A = 2 * (x2 - x1)
+        B = 2 * (y2 - y1)
+        C = r1**2 - r2**2 - x1**2 + x2**2 - y1**2 + y2**2
+        D = 2 * (x3 - x2)
+        E = 2 * (y3 - y2)
+        F = r2**2 - r3**2 - x2**2 + x3**2 - y2**2 + y3**2
+        
+        # Solve the system of equations
+        denominator = A * E - B * D
+        if abs(denominator) < 1e-10:  # Avoid division by zero
+            return None
+        
+        x = (C * E - F * B) / denominator
+        y = (A * F - D * C) / denominator
+        
+        return (x, y)
+    
+    def update_position(self) -> Optional[Dict]:
+        """
+        Calculate new position and update if changed
+        
+        Returns:
+            Position info dictionary if position was updated, None otherwise
+        """
+        new_position = self.calculate_position()
+        if new_position is None:
+            return None
+        
+        x, y = new_position
+        
+        # Check if position has changed significantly (more than 0.1 meters)
+        position_changed = True
+        if self.last_position:
+            last_x, last_y = self.last_position
+            distance_moved = math.sqrt((x - last_x)**2 + (y - last_y)**2)
+            position_changed = distance_moved > 0.1
+        
+        if position_changed:
+            self.last_position = (x, y)
+            self.position_history.append((x, y))
+            
+            # Keep only last 10 positions
+            if len(self.position_history) > 10:
+                self.position_history.pop(0)
+            
+            # Get info about beacons used
+            closest_beacons = self.get_closest_beacons(3)
+            
+            return {
+                'user_id': self.user_id,
+                'x': round(x, 2),
+                'y': round(y, 2),
+                'beacons_used': len(self.beacon_data),
+                'closest_beacons': [
+                    {
+                        'mac': mac,
+                        'distance': round(data['distance'], 2),
+                        'rssi': data['rssi']
+                    }
+                    for mac, data in closest_beacons
+                ]
+            }
+        
+        return None
+    
+    def get_status(self) -> Dict:
+        """
+        Get current status of the user
+        
+        Returns:
+            Dictionary with user status information
+        """
+        return {
+            'user_id': self.user_id,
+            'total_beacons': len(self.beacon_data),
+            'can_calculate': self.can_calculate_position(),
+            'last_position': self.last_position,
+            'beacon_count': len(self.beacon_data)
+        }
+
 class Triangulation:
     def __init__(self, config_file: str = 'bencons.json'):
         """
@@ -23,32 +227,10 @@ class Triangulation:
                 'y': float(coords[1])
             }
         
-        # Store recent RSSI readings for each user and beacon
-        # Format: {user_id: {beacon_mac: [rssi_values]}}
-        self.rssi_readings = {}
+        # Store users
+        self.users = {}  # {user_id: User object}
     
-    def rssi_to_distance(self, rssi: int, tx_power: int = -59) -> float:
-        """
-        Convert RSSI to distance estimate using logarithmic path loss model
-        
-        Args:
-            rssi: Received Signal Strength Indicator
-            tx_power: Transmit power at 1 meter (default -59 dBm)
-            
-        Returns:
-            Estimated distance in meters
-        """
-        if rssi == 0:
-            return -1.0
-        
-        ratio = tx_power * 1.0 / rssi
-        if ratio < 1.0:
-            return math.pow(ratio, 10)
-        else:
-            accuracy = (0.89976) * math.pow(ratio, 7.7095) + 0.111
-            return accuracy
-    
-    def update_rssi(self, user_id: str, mac: str, rssi: int):
+    def update_rssi(self, user_id: str, mac: str, rssi: int) -> Optional[Dict]:
         """
         Update RSSI reading for a specific user and beacon
         
@@ -56,97 +238,96 @@ class Triangulation:
             user_id: User ID
             mac: MAC address of the beacon
             rssi: RSSI value
-        """
-        if user_id not in self.rssi_readings:
-            self.rssi_readings[user_id] = {}
-        
-        if mac not in self.rssi_readings[user_id]:
-            self.rssi_readings[user_id][mac] = []
-        
-        # Keep only last 3 readings for smoothing (reduced for faster response)
-        self.rssi_readings[user_id][mac].append(rssi)
-        if len(self.rssi_readings[user_id][mac]) > 3:
-            self.rssi_readings[user_id][mac].pop(0)
-    
-    def get_average_rssi(self, user_id: str, mac: str) -> Optional[int]:
-        """
-        Get averaged RSSI for more stable distance calculation
-        
-        Args:
-            user_id: User ID
-            mac: MAC address of the beacon
             
         Returns:
-            Average RSSI or None if no readings available
+            Position info if position was updated, None otherwise
         """
-        if (user_id not in self.rssi_readings or 
-            mac not in self.rssi_readings[user_id] or 
-            not self.rssi_readings[user_id][mac]):
+        # Create user if doesn't exist
+        if user_id not in self.users:
+            self.users[user_id] = User(user_id)
+        
+        # Check if beacon exists in our configuration
+        if mac not in self.beacons:
+            print(f"Warning: Unknown beacon {mac}")
             return None
         
-        return sum(self.rssi_readings[user_id][mac]) / len(self.rssi_readings[user_id][mac])
+        user = self.users[user_id]
+        beacon_position = (self.beacons[mac]['x'], self.beacons[mac]['y'])
+        
+        # Update beacon RSSI and check if significant change occurred
+        has_significant_change = user.update_beacon_rssi(mac, rssi, beacon_position)
+        
+        # Only calculate position if there's significant change and we have enough beacons
+        if has_significant_change and user.can_calculate_position():
+            return user.update_position()
+        
+        return None
     
-    def trilaterate(self, user_id: str) -> Optional[Tuple[float, float]]:
+    def get_user_status(self, user_id: str) -> Optional[Dict]:
         """
-        Calculate user position using trilateration
+        Get status of a specific user
+        
+        Args:
+            user_id: User ID to get status for
+            
+        Returns:
+            Dictionary with user status or None if user doesn't exist
+        """
+        if user_id not in self.users:
+            return None
+        
+        return self.users[user_id].get_status()
+    
+    def get_all_users_status(self) -> Dict:
+        """
+        Get status of all users
+        
+        Returns:
+            Dictionary with all users' status
+        """
+        return {
+            user_id: user.get_status() 
+            for user_id, user in self.users.items()
+        }
+    
+    def force_calculate_position(self, user_id: str) -> Optional[Dict]:
+        """
+        Force calculate position for a user (bypass change detection)
         
         Args:
             user_id: User ID to calculate position for
             
         Returns:
-            Tuple of (x, y) coordinates or None if insufficient data
+            Position info or None if calculation failed
         """
-        # Check if we have RSSI data for this user
-        if user_id not in self.rssi_readings:
+        if user_id not in self.users:
             return None
         
-        beacon_macs = list(self.beacons.keys())
-        if len(beacon_macs) < 3:
+        user = self.users[user_id]
+        if not user.can_calculate_position():
             return None
         
-        distances = {}
-        positions = {}
-        
-        # Calculate distances for all beacons with RSSI data for this user
-        for mac in beacon_macs:
-            avg_rssi = self.get_average_rssi(user_id, mac)
-            if avg_rssi is not None:
-                distances[mac] = self.rssi_to_distance(avg_rssi)
-                positions[mac] = (self.beacons[mac]['x'], self.beacons[mac]['y'])
-        
-        # Need at least 3 beacons for trilateration
-        if len(distances) < 3:
+        position = user.calculate_position()
+        if position is None:
             return None
         
-        # Use first 3 beacons with valid data
-        beacon_list = list(distances.keys())[:3]
+        x, y = position
+        closest_beacons = user.get_closest_beacons(3)
         
-        # Extract coordinates and distances
-        x1, y1 = positions[beacon_list[0]]
-        x2, y2 = positions[beacon_list[1]]
-        x3, y3 = positions[beacon_list[2]]
-        
-        r1 = distances[beacon_list[0]]
-        r2 = distances[beacon_list[1]]
-        r3 = distances[beacon_list[2]]
-        
-        # Trilateration calculation
-        A = 2 * (x2 - x1)
-        B = 2 * (y2 - y1)
-        C = r1**2 - r2**2 - x1**2 + x2**2 - y1**2 + y2**2
-        D = 2 * (x3 - x2)
-        E = 2 * (y3 - y2)
-        F = r2**2 - r3**2 - x2**2 + x3**2 - y2**2 + y3**2
-        
-        # Solve the system of equations
-        denominator = A * E - B * D
-        if abs(denominator) < 1e-10:  # Avoid division by zero
-            return None
-        
-        x = (C * E - F * B) / denominator
-        y = (A * F - D * C) / denominator
-        
-        return (x, y)
+        return {
+            'user_id': user_id,
+            'x': round(x, 2),
+            'y': round(y, 2),
+            'beacons_used': len(user.beacon_data),
+            'closest_beacons': [
+                {
+                    'mac': mac,
+                    'distance': round(data['distance'], 2),
+                    'rssi': data['rssi']
+                }
+                for mac, data in closest_beacons
+            ]
+        }
     
     def parse_beacon_data(self, data: str) -> Tuple[str, int]:
         """
@@ -166,38 +347,6 @@ class Triangulation:
         except (ValueError, IndexError):
             raise ValueError(f"Invalid data format: {data}")
     
-    def get_user_position(self, user_id: str) -> Optional[Dict]:
-        """
-        Get current position for a user
-        
-        Args:
-            user_id: User ID to get position for
-            
-        Returns:
-            Dictionary with position info or None
-        """
-        position = self.trilaterate(user_id)
-        if position is None:
-            return None
-        
-        x, y = position
-        
-        # Calculate confidence based on number of available beacons for this user
-        available_beacons = 0
-        if user_id in self.rssi_readings:
-            available_beacons = len([mac for mac in self.beacons.keys() 
-                                   if self.get_average_rssi(user_id, mac) is not None])
-        
-        confidence = min(available_beacons / 3.0 * 100, 100)
-        
-        return {
-            'user_id': user_id,
-            'x': round(x, 2),
-            'y': round(y, 2),
-            'confidence': round(confidence, 1),
-            'beacons_used': available_beacons
-        }
-    
     def get_debug_info(self, user_id: str) -> Dict:
         """
         Get debug information for a user
@@ -208,20 +357,29 @@ class Triangulation:
         Returns:
             Dictionary with debug information
         """
-        debug_info = {
+        if user_id not in self.users:
+            return {
+                'user_id': user_id,
+                'exists': False,
+                'message': 'User not found'
+            }
+        
+        user = self.users[user_id]
+        closest_beacons = user.get_closest_beacons(3)
+        
+        return {
             'user_id': user_id,
-            'beacons_data': {},
-            'total_beacons': len(self.beacons)
-        }
-        
-        if user_id in self.rssi_readings:
-            for mac in self.beacons.keys():
-                avg_rssi = self.get_average_rssi(user_id, mac)
-                debug_info['beacons_data'][mac] = {
-                    'position': f"({self.beacons[mac]['x']}, {self.beacons[mac]['y']})",
-                    'avg_rssi': avg_rssi,
-                    'distance': self.rssi_to_distance(avg_rssi) if avg_rssi else None,
-                    'readings_count': len(self.rssi_readings[user_id].get(mac, []))
+            'exists': True,
+            'total_beacons_detected': len(user.beacon_data),
+            'can_calculate_position': user.can_calculate_position(),
+            'last_position': user.last_position,
+            'closest_beacons': [
+                {
+                    'mac': mac,
+                    'position': data['position'],
+                    'distance': round(data['distance'], 2),
+                    'rssi': data['rssi']
                 }
-        
-        return debug_info
+                for mac, data in closest_beacons
+            ]
+        }
