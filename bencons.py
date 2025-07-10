@@ -32,19 +32,24 @@ class BeaconDelegate(DefaultDelegate):
             # Update RSSI and get position if there's significant change
             position_info = triangulation.update_rssi(user_id, self.beacon_mac, rssi)
             
-            if position_info:
-                # Position was updated due to significant change
-                print(f"[{timestamp}] 🎯 User {user_id} NEW POSITION: X={position_info['x']}, Y={position_info['y']}")
-                print(f"    └─ Using {position_info['beacons_used']} beacons:")
-                for beacon in position_info['closest_beacons']:
-                    print(f"       • {beacon['mac']}: {beacon['distance']}m (RSSI: {beacon['rssi']})")
+            # Always try to get current position for display
+            current_position = triangulation.force_calculate_position(user_id)
+            
+            if current_position:
+                if position_info:
+                    # Position was updated due to significant change
+                    print(f"[{timestamp}] 🎯 User {user_id} NEW POSITION: X={current_position['x']}, Y={current_position['y']}")
+                    print(f"    └─ Using {current_position['beacons_used']} beacons:")
+                    for beacon in current_position['closest_beacons']:
+                        print(f"       • {beacon['mac']}: {beacon['distance']}m (RSSI: {beacon['rssi']})")
+                else:
+                    # Position calculated but no significant change
+                    print(f"[{timestamp}] 📍 User {user_id} Current Position: X={current_position['x']}, Y={current_position['y']} ({current_position['beacons_used']} beacons)")
             else:
-                # No position update (no significant change or insufficient beacons)
+                # No position can be calculated
                 user_status = triangulation.get_user_status(user_id)
                 if user_status and not user_status['can_calculate']:
                     print(f"[{timestamp}] User {user_id}: Collecting data... ({user_status['beacon_count']}/3 beacons)")
-                else:
-                    print(f"[{timestamp}] User {user_id}: No significant change detected")
                 
         except ValueError as e:
             print(f"[{timestamp}] Error parsing data: {e}")
