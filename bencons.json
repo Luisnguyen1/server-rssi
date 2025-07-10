@@ -2,15 +2,19 @@
     "beacons": [
         {
             "mac": "80:4B:50:56:A6:91",
-            "notify_handle": "0x0021"
+            "notify_handle": "0x0021",
+            "toado": "0,0"
+
         },
         {
             "mac": "60:A4:23:C9:85:C1",
-            "notify_handle": "0x0021"
+            "notify_handle": "0x0021",
+            "toado": "0,4"
         },
         {
-            "mac": "C0:2C:ED:90:AD:A3",
-            "notify_handle": "0x0022"
+            "mac": "80:4B:50:54:96:4A",
+            "notify_handle": "0x0021",
+            "toado": "0,12"
         }
     ]
 }

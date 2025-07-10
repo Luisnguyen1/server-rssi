@@ -3,12 +3,16 @@ import time
 import threading
 import json
 from datetime import datetime
+from triangulation import Triangulation
 
 CHAR_UUID = "e8e0f616-ff20-48d1-8f60-18f495a44385"
 
 # Load beacon configuration
 with open('bencons.json', 'r') as f:
     config = json.load(f)
+
+# Initialize triangulation system
+triangulation = Triangulation()
 
 # Create a delegate class to handle notifications
 class BeaconDelegate(DefaultDelegate):
@@ -18,7 +22,23 @@ class BeaconDelegate(DefaultDelegate):
 
     def handleNotification(self, cHandle, data):
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        print(f"[{timestamp}] Beacon {self.beacon_mac} - Handle: {cHandle}, Data: {data}, Hex: {data.hex()}")
+        data_str = data.decode('utf-8')
+        print(f"[{timestamp}] Beacon {self.beacon_mac} - Handle: {cHandle}, Data: {data_str}, Hex: {data.hex()}")
+        
+        # Parse beacon data and update triangulation
+        try:
+            user_id, rssi = triangulation.parse_beacon_data(data_str)
+            triangulation.update_rssi(self.beacon_mac, rssi)
+            
+            # Calculate and display user position
+            position = triangulation.get_user_position(user_id)
+            if position:
+                print(f"[{timestamp}] User {user_id} position: X={position['x']}, Y={position['y']} (Confidence: {position['confidence']}%)")
+            else:
+                print(f"[{timestamp}] Insufficient data for position calculation")
+                
+        except ValueError as e:
+            print(f"[{timestamp}] Error parsing data: {e}")
 
 class BeaconConnection:
     def __init__(self, beacon_info):
@@ -86,6 +106,10 @@ def main():
     beacon_connections = []
     
     print(f"Starting connections to {len(config['beacons'])} beacons...")
+    print("Beacon positions:")
+    for beacon in config['beacons']:
+        print(f"  {beacon['mac']}: {beacon['toado']}")
+    print("=" * 60)
     
     # Create and start connections for all beacons
     for beacon_info in config['beacons']:
