@@ -23,7 +23,8 @@ class Triangulation:
                 'y': float(coords[1])
             }
         
-        # Store recent RSSI readings for each beacon
+        # Store recent RSSI readings for each user and beacon
+        # Format: {user_id: {beacon_mac: [rssi_values]}}
         self.rssi_readings = {}
     
     def rssi_to_distance(self, rssi: int, tx_power: int = -59) -> float:
@@ -47,45 +48,58 @@ class Triangulation:
             accuracy = (0.89976) * math.pow(ratio, 7.7095) + 0.111
             return accuracy
     
-    def update_rssi(self, mac: str, rssi: int):
+    def update_rssi(self, user_id: str, mac: str, rssi: int):
         """
-        Update RSSI reading for a beacon
+        Update RSSI reading for a specific user and beacon
         
         Args:
+            user_id: User ID
             mac: MAC address of the beacon
             rssi: RSSI value
         """
-        if mac not in self.rssi_readings:
-            self.rssi_readings[mac] = []
+        if user_id not in self.rssi_readings:
+            self.rssi_readings[user_id] = {}
         
-        # Keep only last 5 readings for smoothing
-        self.rssi_readings[mac].append(rssi)
-        if len(self.rssi_readings[mac]) > 5:
-            self.rssi_readings[mac].pop(0)
+        if mac not in self.rssi_readings[user_id]:
+            self.rssi_readings[user_id][mac] = []
+        
+        # Keep only last 3 readings for smoothing (reduced for faster response)
+        self.rssi_readings[user_id][mac].append(rssi)
+        if len(self.rssi_readings[user_id][mac]) > 3:
+            self.rssi_readings[user_id][mac].pop(0)
     
-    def get_average_rssi(self, mac: str) -> Optional[int]:
+    def get_average_rssi(self, user_id: str, mac: str) -> Optional[int]:
         """
         Get averaged RSSI for more stable distance calculation
         
         Args:
+            user_id: User ID
             mac: MAC address of the beacon
             
         Returns:
             Average RSSI or None if no readings available
         """
-        if mac not in self.rssi_readings or not self.rssi_readings[mac]:
+        if (user_id not in self.rssi_readings or 
+            mac not in self.rssi_readings[user_id] or 
+            not self.rssi_readings[user_id][mac]):
             return None
         
-        return sum(self.rssi_readings[mac]) / len(self.rssi_readings[mac])
+        return sum(self.rssi_readings[user_id][mac]) / len(self.rssi_readings[user_id][mac])
     
-    def trilaterate(self) -> Optional[Tuple[float, float]]:
+    def trilaterate(self, user_id: str) -> Optional[Tuple[float, float]]:
         """
         Calculate user position using trilateration
         
+        Args:
+            user_id: User ID to calculate position for
+            
         Returns:
             Tuple of (x, y) coordinates or None if insufficient data
         """
-        # Check if we have RSSI data for all 3 beacons
+        # Check if we have RSSI data for this user
+        if user_id not in self.rssi_readings:
+            return None
+        
         beacon_macs = list(self.beacons.keys())
         if len(beacon_macs) < 3:
             return None
@@ -93,9 +107,9 @@ class Triangulation:
         distances = {}
         positions = {}
         
-        # Calculate distances for all beacons with RSSI data
+        # Calculate distances for all beacons with RSSI data for this user
         for mac in beacon_macs:
-            avg_rssi = self.get_average_rssi(mac)
+            avg_rssi = self.get_average_rssi(user_id, mac)
             if avg_rssi is not None:
                 distances[mac] = self.rssi_to_distance(avg_rssi)
                 positions[mac] = (self.beacons[mac]['x'], self.beacons[mac]['y'])
@@ -152,25 +166,28 @@ class Triangulation:
         except (ValueError, IndexError):
             raise ValueError(f"Invalid data format: {data}")
     
-    def get_user_position(self, user_id: str = None) -> Optional[Dict]:
+    def get_user_position(self, user_id: str) -> Optional[Dict]:
         """
         Get current position for a user
         
         Args:
-            user_id: User ID to get position for (optional)
+            user_id: User ID to get position for
             
         Returns:
             Dictionary with position info or None
         """
-        position = self.trilaterate()
+        position = self.trilaterate(user_id)
         if position is None:
             return None
         
         x, y = position
         
-        # Calculate confidence based on number of available beacons
-        available_beacons = len([mac for mac in self.beacons.keys() 
-                               if self.get_average_rssi(mac) is not None])
+        # Calculate confidence based on number of available beacons for this user
+        available_beacons = 0
+        if user_id in self.rssi_readings:
+            available_beacons = len([mac for mac in self.beacons.keys() 
+                                   if self.get_average_rssi(user_id, mac) is not None])
+        
         confidence = min(available_beacons / 3.0 * 100, 100)
         
         return {
@@ -180,3 +197,31 @@ class Triangulation:
             'confidence': round(confidence, 1),
             'beacons_used': available_beacons
         }
+    
+    def get_debug_info(self, user_id: str) -> Dict:
+        """
+        Get debug information for a user
+        
+        Args:
+            user_id: User ID to get debug info for
+            
+        Returns:
+            Dictionary with debug information
+        """
+        debug_info = {
+            'user_id': user_id,
+            'beacons_data': {},
+            'total_beacons': len(self.beacons)
+        }
+        
+        if user_id in self.rssi_readings:
+            for mac in self.beacons.keys():
+                avg_rssi = self.get_average_rssi(user_id, mac)
+                debug_info['beacons_data'][mac] = {
+                    'position': f"({self.beacons[mac]['x']}, {self.beacons[mac]['y']})",
+                    'avg_rssi': avg_rssi,
+                    'distance': self.rssi_to_distance(avg_rssi) if avg_rssi else None,
+                    'readings_count': len(self.rssi_readings[user_id].get(mac, []))
+                }
+        
+        return debug_info

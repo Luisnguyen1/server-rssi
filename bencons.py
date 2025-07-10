@@ -28,14 +28,17 @@ class BeaconDelegate(DefaultDelegate):
         # Parse beacon data and update triangulation
         try:
             user_id, rssi = triangulation.parse_beacon_data(data_str)
-            triangulation.update_rssi(self.beacon_mac, rssi)
+            triangulation.update_rssi(user_id, self.beacon_mac, rssi)
             
             # Calculate and display user position
             position = triangulation.get_user_position(user_id)
             if position:
                 print(f"[{timestamp}] User {user_id} position: X={position['x']}, Y={position['y']} (Confidence: {position['confidence']}%)")
             else:
-                print(f"[{timestamp}] Insufficient data for position calculation")
+                # Show debug info when position calculation fails
+                debug_info = triangulation.get_debug_info(user_id)
+                beacons_with_data = len([b for b in debug_info['beacons_data'].values() if b['avg_rssi'] is not None])
+                print(f"[{timestamp}] User {user_id}: Need 3 beacons, have {beacons_with_data}/3")
                 
         except ValueError as e:
             print(f"[{timestamp}] Error parsing data: {e}")
