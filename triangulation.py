@@ -46,6 +46,9 @@ class User:
             'position': beacon_position
         }
         
+        # Debug info
+        print(f"Debug: User {self.user_id} - Beacon {beacon_mac}: RSSI={rssi}, Distance={distance:.2f}m, New={is_new_beacon}, Change={significant_change}")
+        
         return is_new_beacon or significant_change
     
     def _rssi_to_distance(self, rssi: int, tx_power: int = -59) -> float:
@@ -62,12 +65,24 @@ class User:
         if rssi == 0:
             return -1.0
         
-        ratio = tx_power * 1.0 / rssi
-        if ratio < 1.0:
-            return math.pow(ratio, 10)
-        else:
-            accuracy = (0.89976) * math.pow(ratio, 7.7095) + 0.111
-            return accuracy
+        # For negative RSSI values (which is normal), use absolute value in calculation
+        if rssi > 0:
+            print(f"Warning: Positive RSSI value {rssi} for user {self.user_id}")
+            return -1.0
+        
+        # Use a simpler and more reliable distance calculation
+        # Based on free space path loss model
+        if rssi >= tx_power:
+            return 0.1  # Very close, minimum distance
+        
+        # Calculate distance using path loss formula
+        # Distance = 10^((TxPower - RSSI) / (10 * n)) where n = 2 for free space
+        distance = math.pow(10, (tx_power - rssi) / 20.0)
+        
+        # Limit distance to reasonable range (0.1m to 100m)
+        distance = max(0.1, min(distance, 100.0))
+        
+        return distance
     
     def get_closest_beacons(self, count: int = 3) -> List[Tuple[str, Dict]]:
         """
@@ -125,23 +140,34 @@ class User:
         r2 = beacon2_data['distance']
         r3 = beacon3_data['distance']
         
-        # Trilateration calculation
-        A = 2 * (x2 - x1)
-        B = 2 * (y2 - y1)
-        C = r1**2 - r2**2 - x1**2 + x2**2 - y1**2 + y2**2
-        D = 2 * (x3 - x2)
-        E = 2 * (y3 - y2)
-        F = r2**2 - r3**2 - x2**2 + x3**2 - y2**2 + y3**2
-        
-        # Solve the system of equations
-        denominator = A * E - B * D
-        if abs(denominator) < 1e-10:  # Avoid division by zero
+        # Debug: Check if distances are reasonable
+        if r1 <= 0 or r2 <= 0 or r3 <= 0:
+            print(f"Debug: Invalid distances for user {self.user_id}: r1={r1}, r2={r2}, r3={r3}")
             return None
         
-        x = (C * E - F * B) / denominator
-        y = (A * F - D * C) / denominator
-        
-        return (x, y)
+        # Trilateration calculation
+        try:
+            A = 2 * (x2 - x1)
+            B = 2 * (y2 - y1)
+            C = r1**2 - r2**2 - x1**2 + x2**2 - y1**2 + y2**2
+            D = 2 * (x3 - x2)
+            E = 2 * (y3 - y2)
+            F = r2**2 - r3**2 - x2**2 + x3**2 - y2**2 + y3**2
+            
+            # Solve the system of equations
+            denominator = A * E - B * D
+            if abs(denominator) < 1e-10:  # Avoid division by zero
+                print(f"Debug: Denominator too small for user {self.user_id}: {denominator}")
+                return None
+            
+            x = (C * E - F * B) / denominator
+            y = (A * F - D * C) / denominator
+            
+            return (x, y)
+            
+        except Exception as e:
+            print(f"Debug: Trilateration error for user {self.user_id}: {e}")
+            return None
     
     def update_position(self) -> Optional[Dict]:
         """

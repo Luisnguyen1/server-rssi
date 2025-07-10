@@ -39,17 +39,16 @@ class BeaconDelegate(DefaultDelegate):
                 if position_info:
                     # Position was updated due to significant change
                     print(f"[{timestamp}] 🎯 User {user_id} NEW POSITION: X={current_position['x']}, Y={current_position['y']}")
-                    print(f"    └─ Using {current_position['beacons_used']} beacons:")
-                    for beacon in current_position['closest_beacons']:
-                        print(f"       • {beacon['mac']}: {beacon['distance']}m (RSSI: {beacon['rssi']})")
                 else:
-                    # Position calculated but no significant change
-                    print(f"[{timestamp}] 📍 User {user_id} Current Position: X={current_position['x']}, Y={current_position['y']} ({current_position['beacons_used']} beacons)")
+                    # Position calculated but no significant change - show simplified version
+                    print(f"[{timestamp}] 📍 User {user_id}: X={current_position['x']}, Y={current_position['y']}")
             else:
-                # No position can be calculated
-                user_status = triangulation.get_user_status(user_id)
-                if user_status and not user_status['can_calculate']:
-                    print(f"[{timestamp}] User {user_id}: Collecting data... ({user_status['beacon_count']}/3 beacons)")
+                # Debug: show why position can't be calculated
+                debug_info = triangulation.get_debug_info(user_id)
+                if debug_info['exists']:
+                    print(f"[{timestamp}] User {user_id}: {debug_info['total_beacons_detected']}/3 beacons detected")
+                else:
+                    print(f"[{timestamp}] User {user_id}: First detection")
                 
         except ValueError as e:
             print(f"[{timestamp}] Error parsing data: {e}")
@@ -115,6 +114,34 @@ class BeaconConnection:
         self.thread.start()
         return self.thread
 
+def print_positions_periodically():
+    """Print positions of all users every 2 seconds"""
+    while True:
+        time.sleep(2)
+        try:
+            all_users = triangulation.get_all_users_status()
+            if all_users:
+                print("\n" + "="*50)
+                print(f"📊 CURRENT POSITIONS [{datetime.now().strftime('%H:%M:%S')}]")
+                print("="*50)
+                
+                for user_id, status in all_users.items():
+                    if status['can_calculate']:
+                        position = triangulation.force_calculate_position(user_id)
+                        if position:
+                            print(f"👤 User {user_id}: X={position['x']}, Y={position['y']} ({position['beacons_used']} beacons)")
+                            # Show closest beacons
+                            for beacon in position['closest_beacons'][:3]:
+                                print(f"   └─ {beacon['mac']}: {beacon['distance']}m (RSSI: {beacon['rssi']})")
+                        else:
+                            print(f"👤 User {user_id}: Position calculation failed")
+                    else:
+                        print(f"👤 User {user_id}: Collecting data... ({status['beacon_count']}/3 beacons)")
+                print("="*50 + "\n")
+            
+        except Exception as e:
+            print(f"Error in position monitoring: {e}")
+
 def main():
     """Main function to handle multiple beacon connections"""
     beacon_connections = []
@@ -131,6 +158,11 @@ def main():
         beacon_connections.append(beacon_conn)
         beacon_conn.start_thread()
         time.sleep(0.5)  # Small delay between connections
+    
+    # Start position monitoring thread
+    position_thread = threading.Thread(target=print_positions_periodically, daemon=True)
+    position_thread.start()
+    print("📍 Position monitoring thread started (every 2 seconds)")
     
     try:
         print("\nAll beacons connected. Press Ctrl+C to stop...")
