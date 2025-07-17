@@ -4,6 +4,7 @@ import time
 import json
 import numpy as np
 from filterpy.kalman import KalmanFilter
+import math
 
 # === Cấu hình ===
 CHAR_UUID = "e8e0f616-ff20-48d1-8f60-18f495a44385"
@@ -28,6 +29,8 @@ for b in beacons:
 # === Kalman filter cho từng beacon MAC ===
 kalman_filters = {}
 user_data = {}  # { user_id: {mac1: distance1, mac2: distance2, ...} }
+user_positions = {}  # { user_id: {"x": x, "y": y, "timestamp": time, "accuracy": accuracy} }
+data_lock = threading.Lock()
 
 def create_kalman_filter():
     kf = KalmanFilter(dim_x=2, dim_z=1)
@@ -45,8 +48,14 @@ def estimate_distance(rssi):
     return 10 ** ((TX_POWER - rssi) / (10 * ENV_FACTOR))
 
 def trilaterate(positions, distances):
+    """
+    Tính toán vị trí bằng phương pháp trilateration
+    positions: [(x1,y1), (x2,y2), (x3,y3), ...] - tọa độ beacon
+    distances: [d1, d2, d3, ...] - khoảng cách đến từng beacon
+    """
     if len(positions) < 3:
-        return None
+        return None, None
+    
     (x1, y1), (x2, y2), (x3, y3) = positions[:3]
     r1, r2, r3 = distances[:3]
 
@@ -59,12 +68,86 @@ def trilaterate(positions, distances):
     F = r2**2 - r3**2 - x2**2 + x3**2 - y2**2 + y3**2
 
     denominator = A*E - B*D
-    if denominator == 0:
-        return None
+    if abs(denominator) < 1e-10:  # Tránh chia cho 0
+        return None, None
 
     x = (C*E - F*B) / denominator
     y = (A*F - C*D) / denominator
-    return (x, y)
+    
+    # Tính độ chính xác dựa trên sai số
+    accuracy = calculate_position_accuracy(positions[:3], distances[:3], (x, y))
+    
+    return (x, y), accuracy
+
+def calculate_position_accuracy(positions, distances, calculated_pos):
+    """Tính độ chính xác của vị trí được tính toán"""
+    if not calculated_pos:
+        return 0
+    
+    x, y = calculated_pos
+    errors = []
+    
+    for (bx, by), expected_dist in zip(positions, distances):
+        actual_dist = np.sqrt((x - bx)**2 + (y - by)**2)
+        error = abs(actual_dist - expected_dist)
+        errors.append(error)
+    
+    avg_error = np.mean(errors)
+    # Chuyển đổi thành % độ chính xác (100% - error%)
+    accuracy = max(0, 100 - (avg_error * 10))  # Giả sử 10m error = 100% không chính xác
+    return round(accuracy, 1)
+
+def get_beacon_name_from_mac(mac):
+    """Lấy tên beacon từ MAC address"""
+    for i, beacon in enumerate(beacons):
+        if beacon["mac"] == mac:
+            return f"beacon{i+1}"
+    return mac
+
+def get_user_position(user_id):
+    """Lấy vị trí hiện tại của user"""
+    with data_lock:
+        return user_positions.get(user_id, None)
+
+def get_all_user_positions():
+    """Lấy vị trí của tất cả user"""
+    with data_lock:
+        return dict(user_positions)
+
+def get_user_data_with_position(user_id):
+    """Lấy đầy đủ thông tin user bao gồm khoảng cách và vị trí"""
+    with data_lock:
+        result = {
+            "user_id": user_id,
+            "distances": {},
+            "position": None
+        }
+        
+        # Thêm khoảng cách đến các beacon
+        if user_id in user_data:
+            for mac, distance in user_data[user_id].items():
+                beacon_name = get_beacon_name_from_mac(mac)
+                beacon_coord = beacon_coords.get(mac, "Unknown")
+                result["distances"][beacon_name] = {
+                    "distance": round(distance, 2),
+                    "beacon_position": beacon_coord,
+                    "mac": mac
+                }
+        
+        # Thêm vị trí tính toán
+        if user_id in user_positions:
+            result["position"] = user_positions[user_id]
+        
+        return result
+
+def export_positions_json():
+    """Xuất tất cả vị trí user ra định dạng JSON"""
+    all_data = {}
+    with data_lock:
+        for user_id in user_data.keys():
+            all_data[user_id] = get_user_data_with_position(user_id)
+    
+    return json.dumps(all_data, indent=2)
 
 class BeaconDelegate(DefaultDelegate):
     def __init__(self, mac):
@@ -74,7 +157,7 @@ class BeaconDelegate(DefaultDelegate):
             kalman_filters[mac] = create_kalman_filter()
 
     def handleNotification(self, cHandle, data):
-        global user_data
+        global user_data, user_positions
         try:
             data_str = data.decode("utf-8")
             parts = data_str.strip().split(":")
@@ -91,29 +174,59 @@ class BeaconDelegate(DefaultDelegate):
                 kf.update(np.array([[raw_distance]]))
                 filtered = kf.x[0, 0]
 
-                # Lưu theo user
-                if user_id not in user_data:
-                    user_data[user_id] = {}
-                user_data[user_id][self.mac] = filtered
+                with data_lock:
+                    # Lưu khoảng cách theo user
+                    if user_id not in user_data:
+                        user_data[user_id] = {}
+                    user_data[user_id][self.mac] = filtered
 
-                # In tất cả khoảng cách cho user
-                print(f"\n📍 USER: {user_id}")
-                for beacon_mac, dist in user_data[user_id].items():
-                    print(f"  🛰️ Beacon {beacon_mac} ➤ {dist:.2f}m")
+                    # Lấy tên beacon
+                    beacon_name = get_beacon_name_from_mac(self.mac)
+                    
+                    # In thông tin cập nhật
+                    print(f"\n📡 [{beacon_name}] User {user_id}: RSSI={rssi} → Distance={filtered:.2f}m")
+                    
+                    # Hiển thị tất cả khoảng cách hiện tại
+                    print(f"� All distances for User {user_id}:")
+                    for beacon_mac, dist in user_data[user_id].items():
+                        b_name = get_beacon_name_from_mac(beacon_mac)
+                        b_coord = beacon_coords.get(beacon_mac, "Unknown")
+                        print(f"  🛰️ {b_name} ({b_coord}) ➤ {dist:.2f}m")
 
-                # Tính vị trí nếu có >= 3 beacon
-                coords = []
-                dists = []
-                for mac, dist in user_data[user_id].items():
-                    if mac in beacon_coords:
-                        coords.append(beacon_coords[mac])
-                        dists.append(dist)
+                    # Tính vị trí nếu có >= 3 beacon
+                    coords = []
+                    dists = []
+                    beacon_names = []
+                    
+                    for mac, dist in user_data[user_id].items():
+                        if mac in beacon_coords:
+                            coords.append(beacon_coords[mac])
+                            dists.append(dist)
+                            beacon_names.append(get_beacon_name_from_mac(mac))
 
-                if len(coords) >= 3:
-                    pos = trilaterate(coords, dists)
-                    if pos:
-                        x, y = pos
-                        print(f"📌 Vị trí ước tính: x = {x:.2f} m, y = {y:.2f} m")
+                    if len(coords) >= 3:
+                        position, accuracy = trilaterate(coords, dists)
+                        if position:
+                            x, y = position
+                            timestamp = time.time()
+                            
+                            # Lưu vị trí user
+                            user_positions[user_id] = {
+                                "x": round(x, 2),
+                                "y": round(y, 2),
+                                "timestamp": timestamp,
+                                "accuracy": accuracy,
+                                "beacons_used": beacon_names[:3]
+                            }
+                            
+                            print(f"🎯 CALCULATED POSITION:")
+                            print(f"   👤 User: {user_id}")
+                            print(f"   📍 Coordinates: ({x:.2f}, {y:.2f})")
+                            print(f"   🎯 Accuracy: {accuracy:.1f}%")
+                            print(f"   🛰️ Used beacons: {', '.join(beacon_names[:3])}")
+                            print(f"   ⏰ Timestamp: {time.strftime('%H:%M:%S', time.localtime(timestamp))}")
+                    else:
+                        print(f"⚠️ Need at least 3 beacons for position calculation (current: {len(coords)})")
 
         except Exception as e:
             print(f"[{self.mac}] Error in notification: {e}")
@@ -160,9 +273,45 @@ class BeaconConnection:
         except:
             pass
 
+def print_all_positions():
+    """In ra tất cả vị trí user hiện tại"""
+    with data_lock:
+        if not user_positions:
+            print("\n📱 No user positions calculated yet")
+            return
+        
+        print(f"\n{'='*60}")
+        print(f"📍 ALL USER POSITIONS ({len(user_positions)} users)")
+        print(f"{'='*60}")
+        
+        for user_id, pos_info in user_positions.items():
+            age = time.time() - pos_info["timestamp"]
+            print(f"👤 User: {user_id}")
+            print(f"   📍 Position: ({pos_info['x']}, {pos_info['y']})")
+            print(f"   🎯 Accuracy: {pos_info['accuracy']}%")
+            print(f"   🛰️ Beacons: {', '.join(pos_info['beacons_used'])}")
+            print(f"   ⏰ Age: {age:.1f}s ago")
+            print()
+
+def print_beacon_info():
+    """In thông tin về các beacon"""
+    print("🛰️ BEACON CONFIGURATION:")
+    for i, beacon in enumerate(beacons):
+        beacon_name = f"beacon{i+1}"
+        coord = beacon_coords.get(beacon["mac"], "Unknown")
+        print(f"   {beacon_name}: {beacon['mac']} at {coord}")
+
 def main():
     connections = []
-    print("🚀 Starting connection to all beacons...\n")
+    print("🚀 Starting TRILATERATION Server...\n")
+    
+    print_beacon_info()
+    print(f"\n📊 System will calculate user positions using:")
+    print(f"   • TX_POWER: {TX_POWER} dBm")
+    print(f"   • ENV_FACTOR: {ENV_FACTOR}")
+    print(f"   • Kalman filtering for distance smoothing")
+    print(f"   • Trilateration with 3+ beacons\n")
+    
     for beacon in beacons:
         conn = BeaconConnection(beacon["mac"])
         conn.start()
@@ -170,12 +319,25 @@ def main():
         time.sleep(0.5)
 
     try:
+        print("💡 Commands:")
+        print("  - Ctrl+C: Exit and show final positions")
+        print("  - Every 30 seconds: Show all user positions summary\n")
+        
+        last_summary = time.time()
         while True:
             time.sleep(1)
+            
+            # Hiển thị summary mỗi 30 giây
+            if time.time() - last_summary >= 30:
+                print_all_positions()
+                last_summary = time.time()
+                
     except KeyboardInterrupt:
         print("\n🛑 Stopping...")
+        print_all_positions()  # Hiển thị vị trí cuối cùng
         for conn in connections:
             conn.disconnect()
+        print("✅ All connections closed")
 
 if __name__ == "__main__":
     main()
