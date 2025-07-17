@@ -2,9 +2,6 @@ from bluepy.btle import DefaultDelegate, Peripheral, BTLEException
 import threading
 import time
 import json
-import numpy as np
-from filterpy.kalman import KalmanFilter
-from collections import defaultdict
 
 # === Config ===
 CHAR_UUID = "e8e0f616-ff20-48d1-8f60-18f495a44385"
@@ -16,34 +13,57 @@ with open("bencons.json", "r") as f:
     config = json.load(f)
 beacons = config["beacons"]
 
-# === Kalman filter cho mỗi beacon MAC ===
-kalman_filters = {}
-
-# === Bảng lưu khoảng cách theo user & beacon ===
-user_distances = defaultdict(dict)
+# === Bảng lưu dữ liệu user theo format yêu cầu ===
+users_data = {}
 user_lock = threading.Lock()
 
-def create_kalman_filter():
-    kf = KalmanFilter(dim_x=2, dim_z=1)
-    kf.x = np.array([[0.0], [0.0]])
-    kf.F = np.array([[1., 1.], [0., 1.]])
-    kf.H = np.array([[1., 0.]])
-    kf.P *= 1000.
-    kf.R = 0.1
-    kf.Q = np.array([[0.01, 0.01], [0.01, 0.1]])
-    return kf
+# Tạo mapping từ MAC sang tên beacon
+beacon_names = {}
+for i, beacon in enumerate(beacons):
+    beacon_names[beacon["mac"]] = f"beacon{i+1}"
 
 def estimate_distance(rssi):
     if rssi == 0:
         return None
     return 10 ** ((TX_POWER - rssi) / (10 * ENV_FACTOR))
 
+def print_all_users():
+    """In ra tất cả dữ liệu user hiện tại"""
+    with user_lock:
+        if not users_data:
+            print("\n📱 No users detected yet")
+            return
+        
+        print(f"\n📱 All Users Data ({len(users_data)} users):")
+        print("=" * 50)
+        for user_id, user_info in users_data.items():
+            print(f"👤 User {user_id}: {user_info}")
+        print("=" * 50)
+
+def get_user_data(user_id):
+    """Lấy dữ liệu của một user cụ thể"""
+    with user_lock:
+        return users_data.get(user_id, None)
+
+def reset_user_data(user_id=None):
+    """Reset dữ liệu user (tất cả hoặc một user cụ thể)"""
+    with user_lock:
+        if user_id:
+            if user_id in users_data:
+                # Reset về giá trị null cho tất cả beacon
+                for beacon_mac in beacon_names:
+                    users_data[user_id][beacon_names[beacon_mac]] = None
+                print(f"✅ Reset data for user {user_id}")
+            else:
+                print(f"❌ User {user_id} not found")
+        else:
+            users_data.clear()
+            print("✅ Reset all users data")
+
 class BeaconDelegate(DefaultDelegate):
     def __init__(self, mac):
         super().__init__()
         self.mac = mac
-        if mac not in kalman_filters:
-            kalman_filters[mac] = create_kalman_filter()
 
     def handleNotification(self, cHandle, data):
         try:
@@ -53,28 +73,29 @@ class BeaconDelegate(DefaultDelegate):
                 user_id, rssi = parts
                 rssi = int(rssi)
 
-                raw_distance = estimate_distance(rssi)
-                if raw_distance is None:
-                    return
+                # Lấy tên beacon từ MAC
+                beacon_name = beacon_names.get(self.mac, self.mac)
 
-                # Kalman filtering
-                kf = kalman_filters[self.mac]
-                kf.predict()
-                kf.update(np.array([[raw_distance]]))
-                filtered = round(kf.x[0, 0], 2)
-
-                # Cập nhật bảng user → beacon → khoảng cách
+                # Cập nhật dữ liệu user
                 with user_lock:
-                    user_distances[user_id][self.mac] = filtered
-
-                    # In ra nếu đã có 3 beacon
-                    if len(user_distances[user_id]) == 3:
-                        print(f"\n👤 User: {user_id}\n📍 Distances:")
-                        for beacon_mac, dist in user_distances[user_id].items():
-                            print(f"  • {beacon_mac} → {dist} m")
-
-                        # Nếu muốn reset sau mỗi lần in:
-                        # user_distances[user_id].clear()
+                    # Khởi tạo user nếu chưa có
+                    if user_id not in users_data:
+                        users_data[user_id] = {"id": user_id}
+                        # Khởi tạo tất cả beacon với giá trị null
+                        for beacon_mac in beacon_names:
+                            users_data[user_id][beacon_names[beacon_mac]] = None
+                    
+                    # Cập nhật RSSI cho beacon hiện tại
+                    users_data[user_id][beacon_name] = rssi
+                    
+                    # In ra dữ liệu user hiện tại
+                    print(f"\n👤 User {user_id} data updated:")
+                    print(f"📍 {users_data[user_id]}")
+                    
+                    # Kiểm tra xem đã nhận đủ data từ tất cả beacon chưa
+                    beacon_count = sum(1 for key, value in users_data[user_id].items() 
+                                     if key != "id" and value is not None)
+                    print(f"📊 Received data from {beacon_count}/{len(beacons)} beacons")
 
         except Exception as e:
             print(f"[{self.mac}] Notification error: {e}")
@@ -124,6 +145,14 @@ class BeaconConnection:
 def main():
     connections = []
     print("📡 Starting connection to all beacons...\n")
+    
+    # In ra thông tin beacon mapping
+    print("🏷️  Beacon Mapping:")
+    for beacon in beacons:
+        beacon_name = beacon_names[beacon["mac"]]
+        print(f"  • {beacon_name}: {beacon['mac']} (Position: {beacon['toado']})")
+    print()
+    
     for beacon in beacons:
         conn = BeaconConnection(beacon["mac"])
         conn.start()
@@ -131,10 +160,24 @@ def main():
         time.sleep(0.5)  # avoid overloading bluetooth
 
     try:
+        print("💡 Commands:")
+        print("  - Ctrl+C: Exit")
+        print("  - Data is automatically displayed when received")
+        print("  - Every 30 seconds: Show all users summary\n")
+        
+        last_summary_time = time.time()
         while True:
             time.sleep(1)
+            
+            # Hiển thị summary mỗi 30 giây
+            current_time = time.time()
+            if current_time - last_summary_time >= 30:
+                print_all_users()
+                last_summary_time = current_time
+                
     except KeyboardInterrupt:
         print("\n🛑 Stopping...")
+        print_all_users()  # In ra dữ liệu cuối cùng trước khi thoát
         for conn in connections:
             conn.disconnect()
 
