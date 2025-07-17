@@ -127,38 +127,67 @@ class BeaconConnection:
         self.peripheral = None
         self.thread = None
         self.running = True
+        self.connected = False
+        self.connection_attempts = 0
+        self.max_attempts = 5
 
     def connect_and_listen(self):
-        while self.running:
+        while self.running and self.connection_attempts < self.max_attempts:
             try:
-                print(f"[{self.beacon_name}] Connecting to {self.mac}...")
+                self.connection_attempts += 1
+                print(f"[{self.beacon_name}] Connecting... (Attempt {self.connection_attempts}/{self.max_attempts})")
+                
                 self.peripheral = Peripheral(self.mac)
                 self.peripheral.setDelegate(BeaconDelegate(self.mac))
 
                 char = self.peripheral.getCharacteristics(uuid=CHAR_UUID)[0]
                 self.peripheral.writeCharacteristic(char.getHandle() + 1, b"\x01\x00", withResponse=True)
-                print(f"[{self.beacon_name}] ✅ Connected and listening independently...")
+                
+                self.connected = True
+                print(f"[{self.beacon_name}] ✅ Connected successfully!")
 
                 while self.running:
                     if self.peripheral.waitForNotifications(2.0):
                         continue
+                        
             except BTLEException as e:
                 print(f"[{self.beacon_name}] ❌ Bluetooth error: {e}")
+                self.connected = False
             except Exception as e:
                 print(f"[{self.beacon_name}] ❌ Error: {e}")
+                self.connected = False
             finally:
-                self.disconnect()
-                if self.running:
-                    print(f"[{self.beacon_name}] 🔄 Reconnecting in 5s...")
-                    time.sleep(5)
+                if not self.running:
+                    break
+                    
+                if not self.connected and self.connection_attempts < self.max_attempts:
+                    print(f"[{self.beacon_name}] 🔄 Retrying in 3s...")
+                    time.sleep(3)
+                elif not self.connected:
+                    print(f"[{self.beacon_name}] ❌ Failed to connect after {self.max_attempts} attempts")
+                    break
+                    
+        if not self.connected:
+            print(f"[{self.beacon_name}] 🚨 Connection failed permanently")
 
     def start(self):
         self.thread = threading.Thread(target=self.connect_and_listen, daemon=True)
         self.thread.start()
-        print(f"[{self.beacon_name}] 🚀 Started independent thread")
+        print(f"[{self.beacon_name}] 🚀 Started connection thread")
+
+    def is_connected(self):
+        return self.connected
+
+    def wait_for_connection(self, timeout=30):
+        """Đợi beacon kết nối trong thời gian timeout (giây)"""
+        start_time = time.time()
+        while not self.connected and (time.time() - start_time) < timeout:
+            time.sleep(0.5)
+        return self.connected
 
     def disconnect(self):
         self.running = False
+        self.connected = False
         try:
             if self.peripheral:
                 self.peripheral.disconnect()
@@ -166,30 +195,79 @@ class BeaconConnection:
         except:
             pass
 
+def wait_for_all_beacons(connections, timeout=60):
+    """Đợi tất cả beacon kết nối thành công"""
+    print(f"\n⏳ Waiting for ALL beacons to connect (timeout: {timeout}s)...")
+    start_time = time.time()
+    
+    while (time.time() - start_time) < timeout:
+        connected_beacons = []
+        pending_beacons = []
+        
+        for conn in connections:
+            if conn.is_connected():
+                connected_beacons.append(conn.beacon_name)
+            else:
+                pending_beacons.append(conn.beacon_name)
+        
+        # In trạng thái hiện tại
+        print(f"\r✅ Connected: {len(connected_beacons)}/{len(connections)} - " +
+              f"Ready: {connected_beacons} | Pending: {pending_beacons}", end="", flush=True)
+        
+        # Nếu tất cả đã kết nối
+        if len(connected_beacons) == len(connections):
+            print(f"\n🎉 ALL BEACONS CONNECTED SUCCESSFULLY!")
+            return True
+            
+        time.sleep(1)
+    
+    # Timeout
+    print(f"\n❌ TIMEOUT! Not all beacons connected within {timeout}s")
+    connected_count = sum(1 for conn in connections if conn.is_connected())
+    print(f"� Final status: {connected_count}/{len(connections)} beacons connected")
+    return False
+
 def main():
     connections = []
-    print("📡 Starting INDEPENDENT connection to all beacons...\n")
+    print("�📡 Starting CONTROLLED connection to all beacons...\n")
     
     # In ra thông tin beacon mapping
-    print("🏷️  Beacon Mapping (Independent Processing):")
+    print("🏷️  Beacon Mapping (Must ALL Connect):")
     for beacon in beacons:
         beacon_name = beacon_names[beacon["mac"]]
         print(f"  • {beacon_name}: {beacon['mac']} (Position: {beacon['toado']})")
     print()
     
-    print("🔧 Key Features:")
+    print("🔧 Connection Requirements:")
+    print("  🚨 ALL beacons MUST connect before monitoring starts")
     print("  ✅ Each beacon updates data INDEPENDENTLY")
-    print("  ✅ Beacon1 update does NOT affect Beacon2/Beacon3 data")
     print("  ✅ Thread-safe concurrent processing")
-    print("  ✅ Only changed values trigger notifications\n")
+    print("  ✅ Automatic reconnection on failure\n")
     
+    # Bắt đầu kết nối tất cả beacon
+    print("🚀 Initiating connections...")
     for beacon in beacons:
         conn = BeaconConnection(beacon["mac"])
         conn.start()
         connections.append(conn)
-        time.sleep(0.5)  # avoid overloading bluetooth
+        time.sleep(1)  # Delay giữa các kết nối
+    
+    # Đợi tất cả beacon kết nối
+    if not wait_for_all_beacons(connections, timeout=60):
+        print("\n🚨 CRITICAL: Not all beacons connected!")
+        print("❌ System cannot start without ALL beacons online")
+        
+        # Hiển thị beacon nào chưa kết nối
+        failed_beacons = [conn.beacon_name for conn in connections if not conn.is_connected()]
+        print(f"🔴 Failed beacons: {failed_beacons}")
+        
+        # Đóng tất cả kết nối
+        for conn in connections:
+            conn.disconnect()
+        return False
 
     try:
+        print("\n🎯 ALL BEACONS ONLINE - Starting monitoring...")
         print("💡 Monitoring Commands:")
         print("  - Ctrl+C: Exit and show final data")
         print("  - Real-time updates when beacon data changes")
@@ -198,6 +276,11 @@ def main():
         last_summary_time = time.time()
         while True:
             time.sleep(1)
+            
+            # Kiểm tra trạng thái kết nối
+            disconnected_beacons = [conn.beacon_name for conn in connections if not conn.is_connected()]
+            if disconnected_beacons:
+                print(f"\n⚠️  WARNING: Lost connection to: {disconnected_beacons}")
             
             # Hiển thị summary mỗi 30 giây
             current_time = time.time()
@@ -211,6 +294,7 @@ def main():
         for conn in connections:
             conn.disconnect()
         print("✅ All connections closed safely")
+        return True
 
 if __name__ == "__main__":
     main()
