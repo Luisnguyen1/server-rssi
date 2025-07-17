@@ -4,23 +4,28 @@ import time
 import json
 import numpy as np
 from filterpy.kalman import KalmanFilter
+from collections import defaultdict
 
-# === C?u h�nh ===
+# === Config ===
 CHAR_UUID = "e8e0f616-ff20-48d1-8f60-18f495a44385"
-TX_POWER = -59
-ENV_FACTOR = 2.0  # h? s? m�i tru?ng
+TX_POWER = -59           # RSSI tại khoảng cách 1m (điều chỉnh tùy loại beacon)
+ENV_FACTOR = 2.0         # Hệ số suy giảm môi trường
 
-# === Load danh s�ch beacon t? file JSON ===
+# === Load danh sách beacon từ file JSON ===
 with open("bencons.json", "r") as f:
     config = json.load(f)
 beacons = config["beacons"]
 
-# === Kalman filter cho t?ng beacon MAC ===
+# === Kalman filter cho mỗi beacon MAC ===
 kalman_filters = {}
+
+# === Bảng lưu khoảng cách theo user & beacon ===
+user_distances = defaultdict(dict)
+user_lock = threading.Lock()
 
 def create_kalman_filter():
     kf = KalmanFilter(dim_x=2, dim_z=1)
-    kf.x = np.array([[0.0], [0.0]])  # [distance, velocity]
+    kf.x = np.array([[0.0], [0.0]])
     kf.F = np.array([[1., 1.], [0., 1.]])
     kf.H = np.array([[1., 0.]])
     kf.P *= 1000.
@@ -52,17 +57,27 @@ class BeaconDelegate(DefaultDelegate):
                 if raw_distance is None:
                     return
 
+                # Kalman filtering
                 kf = kalman_filters[self.mac]
                 kf.predict()
                 kf.update(np.array([[raw_distance]]))
-                filtered = kf.x[0, 0]
+                filtered = round(kf.x[0, 0], 2)
 
-                print(f"\n?? Beacon {self.mac}")
-                print(f"?? User: {user_id}")
-                print(f"?? RSSI: {rssi} ? Distance: {raw_distance:.2f}m ? Kalman: {filtered:.2f}m")
+                # Cập nhật bảng user → beacon → khoảng cách
+                with user_lock:
+                    user_distances[user_id][self.mac] = filtered
+
+                    # In ra nếu đã có 3 beacon
+                    if len(user_distances[user_id]) == 3:
+                        print(f"\n👤 User: {user_id}\n📍 Distances:")
+                        for beacon_mac, dist in user_distances[user_id].items():
+                            print(f"  • {beacon_mac} → {dist} m")
+
+                        # Nếu muốn reset sau mỗi lần in:
+                        # user_distances[user_id].clear()
 
         except Exception as e:
-            print(f"[{self.mac}] Error in notification: {e}")
+            print(f"[{self.mac}] Notification error: {e}")
 
 class BeaconConnection:
     def __init__(self, mac):
@@ -85,9 +100,8 @@ class BeaconConnection:
                 while self.running:
                     if self.peripheral.waitForNotifications(2.0):
                         continue
-
             except BTLEException as e:
-                print(f"[{self.mac}] BTLE Exception: {e}")
+                print(f"[{self.mac}] Bluetooth error: {e}")
             except Exception as e:
                 print(f"[{self.mac}] Error: {e}")
             finally:
@@ -109,18 +123,18 @@ class BeaconConnection:
 
 def main():
     connections = []
-    print("?? Starting connection to all beacons...\n")
+    print("📡 Starting connection to all beacons...\n")
     for beacon in beacons:
         conn = BeaconConnection(beacon["mac"])
         conn.start()
         connections.append(conn)
-        time.sleep(0.5)  # tr�nh ngh?n k?t n?i
+        time.sleep(0.5)  # avoid overloading bluetooth
 
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n?? Stopping...")
+        print("\n🛑 Stopping...")
         for conn in connections:
             conn.disconnect()
 
