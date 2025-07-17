@@ -2,86 +2,71 @@ from bluepy.btle import DefaultDelegate, Peripheral, BTLEException
 import threading
 import time
 import json
+import numpy as np
+from filterpy.kalman import KalmanFilter
 
-# === Config ===
+# === Cấu hình ===
 CHAR_UUID = "e8e0f616-ff20-48d1-8f60-18f495a44385"
-TX_POWER = -59           # RSSI tại khoảng cách 1m (điều chỉnh tùy loại beacon)
-ENV_FACTOR = 2.0         # Hệ số suy giảm môi trường
+TX_POWER = -59
+ENV_FACTOR = 2.0  # Hệ số môi trường
 
-# === Load danh sách beacon từ file JSON ===
+# === Load beacon từ file JSON ===
 with open("bencons.json", "r") as f:
     config = json.load(f)
 beacons = config["beacons"]
+beacon_coords = {b["mac"]: (b["x"], b["y"]) for b in beacons}
 
-# === Bảng lưu dữ liệu user theo format yêu cầu ===
-users_data = {}
-user_lock = threading.Lock()
+# === Kalman filter cho từng beacon MAC ===
+kalman_filters = {}
+user_data = {}  # { user_id: {mac1: distance1, mac2: distance2, ...} }
 
-# Tạo mapping từ MAC sang tên beacon
-beacon_names = {}
-for i, beacon in enumerate(beacons):
-    beacon_names[beacon["mac"]] = f"beacon{i+1}"
+def create_kalman_filter():
+    kf = KalmanFilter(dim_x=2, dim_z=1)
+    kf.x = np.array([[0.0], [0.0]])  # [distance, velocity]
+    kf.F = np.array([[1., 1.], [0., 1.]])
+    kf.H = np.array([[1., 0.]])
+    kf.P *= 1000.
+    kf.R = 0.1
+    kf.Q = np.array([[0.01, 0.01], [0.01, 0.1]])
+    return kf
 
 def estimate_distance(rssi):
     if rssi == 0:
         return None
     return 10 ** ((TX_POWER - rssi) / (10 * ENV_FACTOR))
 
-def print_all_users():
-    """In ra tất cả dữ liệu user hiện tại"""
-    with user_lock:
-        if not users_data:
-            print("\n📱 No users detected yet")
-            return
-        
-        print(f"\n📱 All Users Data ({len(users_data)} users):")
-        print("=" * 50)
-        for user_id, user_info in users_data.items():
-            print(f"👤 User {user_id}: {user_info}")
-        print("=" * 50)
+def trilaterate(positions, distances):
+    if len(positions) < 3:
+        return None  # Không đủ 3 beacon để xác định vị trí
 
-def get_user_data(user_id):
-    """Lấy dữ liệu của một user cụ thể"""
-    with user_lock:
-        return users_data.get(user_id, None)
+    (x1, y1), (x2, y2), (x3, y3) = positions[:3]
+    r1, r2, r3 = distances[:3]
 
-def update_specific_beacon(user_id, beacon_name, rssi_value):
-    """Cập nhật RSSI cho một beacon cụ thể của user (để test)"""
-    with user_lock:
-        if user_id not in users_data:
-            users_data[user_id] = {"id": user_id}
-            # Khởi tạo tất cả beacon với giá trị null
-            for beacon_mac in beacon_names:
-                users_data[user_id][beacon_names[beacon_mac]] = None
-        
-        old_value = users_data[user_id].get(beacon_name)
-        users_data[user_id][beacon_name] = rssi_value
-        
-        print(f"🔧 Manual update - [{beacon_name}] User {user_id}: {old_value} → {rssi_value}")
-        print(f"📱 Updated user data: {users_data[user_id]}")
-        return True
+    A = 2*(x2 - x1)
+    B = 2*(y2 - y1)
+    C = r1**2 - r2**2 - x1**2 + x2**2 - y1**2 + y2**2
 
-def reset_user_data(user_id=None):
-    """Reset dữ liệu user (tất cả hoặc một user cụ thể)"""
-    with user_lock:
-        if user_id:
-            if user_id in users_data:
-                # Reset về giá trị null cho tất cả beacon
-                for beacon_mac in beacon_names:
-                    users_data[user_id][beacon_names[beacon_mac]] = None
-                print(f"✅ Reset data for user {user_id}")
-            else:
-                print(f"❌ User {user_id} not found")
-        else:
-            users_data.clear()
-            print("✅ Reset all users data")
+    D = 2*(x3 - x2)
+    E = 2*(y3 - y2)
+    F = r2**2 - r3**2 - x2**2 + x3**2 - y2**2 + y3**2
+
+    denominator = A*E - B*D
+    if denominator == 0:
+        return None
+
+    x = (C*E - F*B) / denominator
+    y = (A*F - C*D) / denominator
+    return (x, y)
 
 class BeaconDelegate(DefaultDelegate):
     def __init__(self, mac):
         super().__init__()
         self.mac = mac
+        if mac not in kalman_filters:
+            kalman_filters[mac] = create_kalman_filter()
 
     def handleNotification(self, cHandle, data):
+        global user_data
         try:
             data_str = data.decode("utf-8")
             parts = data_str.strip().split(":")
@@ -89,212 +74,101 @@ class BeaconDelegate(DefaultDelegate):
                 user_id, rssi = parts
                 rssi = int(rssi)
 
-                # Lấy tên beacon từ MAC
-                beacon_name = beacon_names.get(self.mac, self.mac)
+                raw_distance = estimate_distance(rssi)
+                if raw_distance is None:
+                    return
 
-                # Cập nhật dữ liệu user một cách thread-safe
-                with user_lock:
-                    # Khởi tạo user nếu chưa có
-                    if user_id not in users_data:
-                        users_data[user_id] = {"id": user_id}
-                        # Khởi tạo tất cả beacon với giá trị null
-                        for beacon_mac in beacon_names:
-                            users_data[user_id][beacon_names[beacon_mac]] = None
-                    
-                    # Lưu giá trị cũ để so sánh
-                    old_value = users_data[user_id].get(beacon_name)
-                    
-                    # CHỈ cập nhật RSSI cho beacon hiện tại, không động đến beacon khác
-                    users_data[user_id][beacon_name] = rssi
-                    
-                    # Chỉ in thông báo nếu giá trị thay đổi
-                    if old_value != rssi:
-                        print(f"\n� [{beacon_name}] User {user_id}: {old_value} → {rssi}")
-                        print(f"� Current user data: {users_data[user_id]}")
-                        
-                        # Đếm số beacon đã có data
-                        active_beacons = [key for key, value in users_data[user_id].items() 
-                                        if key != "id" and value is not None]
-                        print(f"📊 Active beacons: {len(active_beacons)}/{len(beacons)} {active_beacons}")
+                kf = kalman_filters[self.mac]
+                kf.predict()
+                kf.update(np.array([[raw_distance]]))
+                filtered = kf.x[0, 0]
+
+                # Lưu dữ liệu theo user
+                if user_id not in user_data:
+                    user_data[user_id] = {}
+                user_data[user_id][self.mac] = filtered
+
+                # In dữ liệu
+                print(f"\n📍 USER: {user_id}")
+                for beacon_mac, dist in user_data[user_id].items():
+                    print(f"  🛰️ Beacon {beacon_mac} ➤ {dist:.2f}m")
+
+                # Nếu có đủ 3 beacon để định vị, tính vị trí người dùng
+                if len(user_data[user_id]) >= 3:
+                    coords = []
+                    dists = []
+                    for mac, dist in user_data[user_id].items():
+                        if mac in beacon_coords:
+                            coords.append(beacon_coords[mac])
+                            dists.append(dist)
+
+                    if len(coords) >= 3:
+                        pos = trilaterate(coords, dists)
+                        if pos:
+                            x, y = pos
+                            print(f"📌 Vị trí ước tính: x = {x:.2f} m, y = {y:.2f} m")
 
         except Exception as e:
-            print(f"[{self.mac}] Notification error: {e}")
+            print(f"[{self.mac}] Error in notification: {e}")
 
 class BeaconConnection:
     def __init__(self, mac):
         self.mac = mac
-        self.beacon_name = beacon_names.get(mac, mac)
         self.peripheral = None
         self.thread = None
         self.running = True
-        self.connected = False
-        self.connection_attempts = 0
-        self.max_attempts = 5
 
     def connect_and_listen(self):
-        while self.running and self.connection_attempts < self.max_attempts:
+        while self.running:
             try:
-                self.connection_attempts += 1
-                print(f"[{self.beacon_name}] Connecting... (Attempt {self.connection_attempts}/{self.max_attempts})")
-                
+                print(f"[{self.mac}] Connecting...")
                 self.peripheral = Peripheral(self.mac)
                 self.peripheral.setDelegate(BeaconDelegate(self.mac))
 
                 char = self.peripheral.getCharacteristics(uuid=CHAR_UUID)[0]
                 self.peripheral.writeCharacteristic(char.getHandle() + 1, b"\x01\x00", withResponse=True)
-                
-                self.connected = True
-                print(f"[{self.beacon_name}] ✅ Connected successfully!")
+                print(f"[{self.mac}] Connected and listening...")
 
                 while self.running:
                     if self.peripheral.waitForNotifications(2.0):
                         continue
-                        
             except BTLEException as e:
-                print(f"[{self.beacon_name}] ❌ Bluetooth error: {e}")
-                self.connected = False
+                print(f"[{self.mac}] BTLE Exception: {e}")
             except Exception as e:
-                print(f"[{self.beacon_name}] ❌ Error: {e}")
-                self.connected = False
+                print(f"[{self.mac}] Error: {e}")
             finally:
-                if not self.running:
-                    break
-                    
-                if not self.connected and self.connection_attempts < self.max_attempts:
-                    print(f"[{self.beacon_name}] 🔄 Retrying in 3s...")
-                    time.sleep(3)
-                elif not self.connected:
-                    print(f"[{self.beacon_name}] ❌ Failed to connect after {self.max_attempts} attempts")
-                    break
-                    
-        if not self.connected:
-            print(f"[{self.beacon_name}] 🚨 Connection failed permanently")
+                self.disconnect()
+                print(f"[{self.mac}] Reconnecting in 5s...")
+                time.sleep(5)
 
     def start(self):
         self.thread = threading.Thread(target=self.connect_and_listen, daemon=True)
         self.thread.start()
-        print(f"[{self.beacon_name}] 🚀 Started connection thread")
-
-    def is_connected(self):
-        return self.connected
-
-    def wait_for_connection(self, timeout=30):
-        """Đợi beacon kết nối trong thời gian timeout (giây)"""
-        start_time = time.time()
-        while not self.connected and (time.time() - start_time) < timeout:
-            time.sleep(0.5)
-        return self.connected
 
     def disconnect(self):
         self.running = False
-        self.connected = False
         try:
             if self.peripheral:
                 self.peripheral.disconnect()
-                print(f"[{self.beacon_name}] 🔌 Disconnected")
         except:
             pass
 
-def wait_for_all_beacons(connections, timeout=60):
-    """Đợi tất cả beacon kết nối thành công"""
-    print(f"\n⏳ Waiting for ALL beacons to connect (timeout: {timeout}s)...")
-    start_time = time.time()
-    
-    while (time.time() - start_time) < timeout:
-        connected_beacons = []
-        pending_beacons = []
-        
-        for conn in connections:
-            if conn.is_connected():
-                connected_beacons.append(conn.beacon_name)
-            else:
-                pending_beacons.append(conn.beacon_name)
-        
-        # In trạng thái hiện tại
-        print(f"\r✅ Connected: {len(connected_beacons)}/{len(connections)} - " +
-              f"Ready: {connected_beacons} | Pending: {pending_beacons}", end="", flush=True)
-        
-        # Nếu tất cả đã kết nối
-        if len(connected_beacons) == len(connections):
-            print(f"\n🎉 ALL BEACONS CONNECTED SUCCESSFULLY!")
-            return True
-            
-        time.sleep(1)
-    
-    # Timeout
-    print(f"\n❌ TIMEOUT! Not all beacons connected within {timeout}s")
-    connected_count = sum(1 for conn in connections if conn.is_connected())
-    print(f"� Final status: {connected_count}/{len(connections)} beacons connected")
-    return False
-
 def main():
     connections = []
-    print("�📡 Starting CONTROLLED connection to all beacons...\n")
-    
-    # In ra thông tin beacon mapping
-    print("🏷️  Beacon Mapping (Must ALL Connect):")
-    for beacon in beacons:
-        beacon_name = beacon_names[beacon["mac"]]
-        print(f"  • {beacon_name}: {beacon['mac']} (Position: {beacon['toado']})")
-    print()
-    
-    print("🔧 Connection Requirements:")
-    print("  🚨 ALL beacons MUST connect before monitoring starts")
-    print("  ✅ Each beacon updates data INDEPENDENTLY")
-    print("  ✅ Thread-safe concurrent processing")
-    print("  ✅ Automatic reconnection on failure\n")
-    
-    # Bắt đầu kết nối tất cả beacon
-    print("🚀 Initiating connections...")
+    print("🚀 Starting connection to all beacons...\n")
     for beacon in beacons:
         conn = BeaconConnection(beacon["mac"])
         conn.start()
         connections.append(conn)
-        time.sleep(1)  # Delay giữa các kết nối
-    
-    # Đợi tất cả beacon kết nối
-    if not wait_for_all_beacons(connections, timeout=60):
-        print("\n🚨 CRITICAL: Not all beacons connected!")
-        print("❌ System cannot start without ALL beacons online")
-        
-        # Hiển thị beacon nào chưa kết nối
-        failed_beacons = [conn.beacon_name for conn in connections if not conn.is_connected()]
-        print(f"🔴 Failed beacons: {failed_beacons}")
-        
-        # Đóng tất cả kết nối
-        for conn in connections:
-            conn.disconnect()
-        return False
+        time.sleep(0.5)
 
     try:
-        print("\n🎯 ALL BEACONS ONLINE - Starting monitoring...")
-        print("💡 Monitoring Commands:")
-        print("  - Ctrl+C: Exit and show final data")
-        print("  - Real-time updates when beacon data changes")
-        print("  - Every 30 seconds: Show complete users summary\n")
-        
-        last_summary_time = time.time()
         while True:
             time.sleep(1)
-            
-            # Kiểm tra trạng thái kết nối
-            disconnected_beacons = [conn.beacon_name for conn in connections if not conn.is_connected()]
-            if disconnected_beacons:
-                print(f"\n⚠️  WARNING: Lost connection to: {disconnected_beacons}")
-            
-            # Hiển thị summary mỗi 30 giây
-            current_time = time.time()
-            if current_time - last_summary_time >= 30:
-                print_all_users()
-                last_summary_time = current_time
-                
     except KeyboardInterrupt:
-        print("\n🛑 Stopping all beacon connections...")
-        print_all_users()  # In ra dữ liệu cuối cùng trước khi thoát
+        print("\n🛑 Stopping...")
         for conn in connections:
             conn.disconnect()
-        print("✅ All connections closed safely")
-        return True
 
 if __name__ == "__main__":
     main()
