@@ -45,6 +45,22 @@ def get_user_data(user_id):
     with user_lock:
         return users_data.get(user_id, None)
 
+def update_specific_beacon(user_id, beacon_name, rssi_value):
+    """Cập nhật RSSI cho một beacon cụ thể của user (để test)"""
+    with user_lock:
+        if user_id not in users_data:
+            users_data[user_id] = {"id": user_id}
+            # Khởi tạo tất cả beacon với giá trị null
+            for beacon_mac in beacon_names:
+                users_data[user_id][beacon_names[beacon_mac]] = None
+        
+        old_value = users_data[user_id].get(beacon_name)
+        users_data[user_id][beacon_name] = rssi_value
+        
+        print(f"🔧 Manual update - [{beacon_name}] User {user_id}: {old_value} → {rssi_value}")
+        print(f"📱 Updated user data: {users_data[user_id]}")
+        return True
+
 def reset_user_data(user_id=None):
     """Reset dữ liệu user (tất cả hoặc một user cụ thể)"""
     with user_lock:
@@ -76,7 +92,7 @@ class BeaconDelegate(DefaultDelegate):
                 # Lấy tên beacon từ MAC
                 beacon_name = beacon_names.get(self.mac, self.mac)
 
-                # Cập nhật dữ liệu user
+                # Cập nhật dữ liệu user một cách thread-safe
                 with user_lock:
                     # Khởi tạo user nếu chưa có
                     if user_id not in users_data:
@@ -85,17 +101,21 @@ class BeaconDelegate(DefaultDelegate):
                         for beacon_mac in beacon_names:
                             users_data[user_id][beacon_names[beacon_mac]] = None
                     
-                    # Cập nhật RSSI cho beacon hiện tại
+                    # Lưu giá trị cũ để so sánh
+                    old_value = users_data[user_id].get(beacon_name)
+                    
+                    # CHỈ cập nhật RSSI cho beacon hiện tại, không động đến beacon khác
                     users_data[user_id][beacon_name] = rssi
                     
-                    # In ra dữ liệu user hiện tại
-                    print(f"\n👤 User {user_id} data updated:")
-                    print(f"📍 {users_data[user_id]}")
-                    
-                    # Kiểm tra xem đã nhận đủ data từ tất cả beacon chưa
-                    beacon_count = sum(1 for key, value in users_data[user_id].items() 
-                                     if key != "id" and value is not None)
-                    print(f"📊 Received data from {beacon_count}/{len(beacons)} beacons")
+                    # Chỉ in thông báo nếu giá trị thay đổi
+                    if old_value != rssi:
+                        print(f"\n� [{beacon_name}] User {user_id}: {old_value} → {rssi}")
+                        print(f"� Current user data: {users_data[user_id]}")
+                        
+                        # Đếm số beacon đã có data
+                        active_beacons = [key for key, value in users_data[user_id].items() 
+                                        if key != "id" and value is not None]
+                        print(f"📊 Active beacons: {len(active_beacons)}/{len(beacons)} {active_beacons}")
 
         except Exception as e:
             print(f"[{self.mac}] Notification error: {e}")
@@ -103,6 +123,7 @@ class BeaconDelegate(DefaultDelegate):
 class BeaconConnection:
     def __init__(self, mac):
         self.mac = mac
+        self.beacon_name = beacon_names.get(mac, mac)
         self.peripheral = None
         self.thread = None
         self.running = True
@@ -110,48 +131,57 @@ class BeaconConnection:
     def connect_and_listen(self):
         while self.running:
             try:
-                print(f"[{self.mac}] Connecting...")
+                print(f"[{self.beacon_name}] Connecting to {self.mac}...")
                 self.peripheral = Peripheral(self.mac)
                 self.peripheral.setDelegate(BeaconDelegate(self.mac))
 
                 char = self.peripheral.getCharacteristics(uuid=CHAR_UUID)[0]
                 self.peripheral.writeCharacteristic(char.getHandle() + 1, b"\x01\x00", withResponse=True)
-                print(f"[{self.mac}] Connected and listening...")
+                print(f"[{self.beacon_name}] ✅ Connected and listening independently...")
 
                 while self.running:
                     if self.peripheral.waitForNotifications(2.0):
                         continue
             except BTLEException as e:
-                print(f"[{self.mac}] Bluetooth error: {e}")
+                print(f"[{self.beacon_name}] ❌ Bluetooth error: {e}")
             except Exception as e:
-                print(f"[{self.mac}] Error: {e}")
+                print(f"[{self.beacon_name}] ❌ Error: {e}")
             finally:
                 self.disconnect()
-                print(f"[{self.mac}] Reconnecting in 5s...")
-                time.sleep(5)
+                if self.running:
+                    print(f"[{self.beacon_name}] 🔄 Reconnecting in 5s...")
+                    time.sleep(5)
 
     def start(self):
         self.thread = threading.Thread(target=self.connect_and_listen, daemon=True)
         self.thread.start()
+        print(f"[{self.beacon_name}] 🚀 Started independent thread")
 
     def disconnect(self):
         self.running = False
         try:
             if self.peripheral:
                 self.peripheral.disconnect()
+                print(f"[{self.beacon_name}] 🔌 Disconnected")
         except:
             pass
 
 def main():
     connections = []
-    print("📡 Starting connection to all beacons...\n")
+    print("📡 Starting INDEPENDENT connection to all beacons...\n")
     
     # In ra thông tin beacon mapping
-    print("🏷️  Beacon Mapping:")
+    print("🏷️  Beacon Mapping (Independent Processing):")
     for beacon in beacons:
         beacon_name = beacon_names[beacon["mac"]]
         print(f"  • {beacon_name}: {beacon['mac']} (Position: {beacon['toado']})")
     print()
+    
+    print("🔧 Key Features:")
+    print("  ✅ Each beacon updates data INDEPENDENTLY")
+    print("  ✅ Beacon1 update does NOT affect Beacon2/Beacon3 data")
+    print("  ✅ Thread-safe concurrent processing")
+    print("  ✅ Only changed values trigger notifications\n")
     
     for beacon in beacons:
         conn = BeaconConnection(beacon["mac"])
@@ -160,10 +190,10 @@ def main():
         time.sleep(0.5)  # avoid overloading bluetooth
 
     try:
-        print("💡 Commands:")
-        print("  - Ctrl+C: Exit")
-        print("  - Data is automatically displayed when received")
-        print("  - Every 30 seconds: Show all users summary\n")
+        print("💡 Monitoring Commands:")
+        print("  - Ctrl+C: Exit and show final data")
+        print("  - Real-time updates when beacon data changes")
+        print("  - Every 30 seconds: Show complete users summary\n")
         
         last_summary_time = time.time()
         while True:
@@ -176,10 +206,11 @@ def main():
                 last_summary_time = current_time
                 
     except KeyboardInterrupt:
-        print("\n🛑 Stopping...")
+        print("\n🛑 Stopping all beacon connections...")
         print_all_users()  # In ra dữ liệu cuối cùng trước khi thoát
         for conn in connections:
             conn.disconnect()
+        print("✅ All connections closed safely")
 
 if __name__ == "__main__":
     main()
