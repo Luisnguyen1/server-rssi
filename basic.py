@@ -14,7 +14,16 @@ ENV_FACTOR = 2.0  # Hệ số môi trường
 with open("bencons.json", "r") as f:
     config = json.load(f)
 beacons = config["beacons"]
-beacon_coords = {b["mac"]: (b["x"], b["y"]) for b in beacons}
+
+# === Tọa độ beacon từ "toado": "x,y"
+beacon_coords = {}
+for b in beacons:
+    if "toado" in b:
+        try:
+            x_str, y_str = b["toado"].split(",")
+            beacon_coords[b["mac"]] = (float(x_str), float(y_str))
+        except:
+            print(f"⚠️ Lỗi tọa độ beacon {b['mac']}, giá trị: {b['toado']}")
 
 # === Kalman filter cho từng beacon MAC ===
 kalman_filters = {}
@@ -37,8 +46,7 @@ def estimate_distance(rssi):
 
 def trilaterate(positions, distances):
     if len(positions) < 3:
-        return None  # Không đủ 3 beacon để xác định vị trí
-
+        return None
     (x1, y1), (x2, y2), (x3, y3) = positions[:3]
     r1, r2, r3 = distances[:3]
 
@@ -83,30 +91,29 @@ class BeaconDelegate(DefaultDelegate):
                 kf.update(np.array([[raw_distance]]))
                 filtered = kf.x[0, 0]
 
-                # Lưu dữ liệu theo user
+                # Lưu theo user
                 if user_id not in user_data:
                     user_data[user_id] = {}
                 user_data[user_id][self.mac] = filtered
 
-                # In dữ liệu
+                # In tất cả khoảng cách cho user
                 print(f"\n📍 USER: {user_id}")
                 for beacon_mac, dist in user_data[user_id].items():
                     print(f"  🛰️ Beacon {beacon_mac} ➤ {dist:.2f}m")
 
-                # Nếu có đủ 3 beacon để định vị, tính vị trí người dùng
-                if len(user_data[user_id]) >= 3:
-                    coords = []
-                    dists = []
-                    for mac, dist in user_data[user_id].items():
-                        if mac in beacon_coords:
-                            coords.append(beacon_coords[mac])
-                            dists.append(dist)
+                # Tính vị trí nếu có >= 3 beacon
+                coords = []
+                dists = []
+                for mac, dist in user_data[user_id].items():
+                    if mac in beacon_coords:
+                        coords.append(beacon_coords[mac])
+                        dists.append(dist)
 
-                    if len(coords) >= 3:
-                        pos = trilaterate(coords, dists)
-                        if pos:
-                            x, y = pos
-                            print(f"📌 Vị trí ước tính: x = {x:.2f} m, y = {y:.2f} m")
+                if len(coords) >= 3:
+                    pos = trilaterate(coords, dists)
+                    if pos:
+                        x, y = pos
+                        print(f"📌 Vị trí ước tính: x = {x:.2f} m, y = {y:.2f} m")
 
         except Exception as e:
             print(f"[{self.mac}] Error in notification: {e}")
