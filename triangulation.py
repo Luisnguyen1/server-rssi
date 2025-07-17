@@ -1,6 +1,7 @@
 import math
 import json
 from typing import Dict, List, Tuple, Optional
+from filterpy.kalman import KalmanFilter
 
 class User:
     def __init__(self, user_id: str):
@@ -14,6 +15,7 @@ class User:
         self.beacon_data = {}  # {beacon_mac: {'rssi': rssi, 'distance': distance}}
         self.last_position = None  # Last calculated position
         self.position_history = []  # History of positions
+        self.kalman_filters = {}  # {beacon_mac: KalmanFilter object}
         
     def update_beacon_rssi(self, beacon_mac: str, rssi: int, beacon_position: Tuple[float, float]) -> bool:
         """
@@ -27,9 +29,31 @@ class User:
         Returns:
             True if there's a significant change requiring position update
         """
-        # Convert RSSI to distance
-        distance = self._rssi_to_distance(rssi)
-        
+        # Kalman filter for RSSI
+        import numpy as np
+        if beacon_mac not in self.kalman_filters:
+            kf = KalmanFilter(dim_x=1, dim_z=1)
+            kf.x = np.array([[rssi]], dtype=float)  # initial state
+            kf.F = np.array([[1]], dtype=float)     # state transition matrix
+            kf.H = np.array([[1]], dtype=float)     # measurement function
+            kf.P *= 2        # initial uncertainty
+            kf.R *= 4        # measurement noise
+            kf.Q *= 0.01     # process noise
+            self.kalman_filters[beacon_mac] = kf
+        else:
+            kf = self.kalman_filters[beacon_mac]
+        kf.predict()
+        kf.update(np.array([[rssi]], dtype=float))
+        filtered_rssi = float(kf.x[0, 0])
+        # Lưu lại lịch sử RSSI nếu muốn debug hoặc so sánh
+        rssi_history = []
+        if beacon_mac in self.beacon_data and 'rssi_history' in self.beacon_data[beacon_mac]:
+            rssi_history = self.beacon_data[beacon_mac]['rssi_history']
+        rssi_history.append(rssi)
+        if len(rssi_history) > 5:
+            rssi_history.pop(0)
+        avg_rssi = sum(rssi_history) / len(rssi_history)
+        distance = self._rssi_to_distance(filtered_rssi)
         # Check if this is a new beacon or if there's significant change
         is_new_beacon = beacon_mac not in self.beacon_data
         significant_change = False
@@ -42,22 +66,22 @@ class User:
         # Update beacon data
         self.beacon_data[beacon_mac] = {
             'rssi': rssi,
+            'filtered_rssi': filtered_rssi,
+            'rssi_history': rssi_history,
             'distance': distance,
             'position': beacon_position
         }
-        
         # Debug info
-        print(f"Debug: User {self.user_id} - Beacon {beacon_mac}: RSSI={rssi}, Distance={distance:.2f}m, New={is_new_beacon}, Change={significant_change}")
-        
+        print(f"Debug: User {self.user_id} - Beacon {beacon_mac}: RSSI={rssi}, AVG_RSSI={avg_rssi:.2f}, Kalman_RSSI={filtered_rssi:.2f}, Distance={distance:.2f}m, New={is_new_beacon}, Change={significant_change}")
         return is_new_beacon or significant_change
     
-    def _rssi_to_distance(self, rssi: int, tx_power: int = -59) -> float:
+    def _rssi_to_distance(self, rssi: int, tx_power: int = -55) -> float:
         """
         Convert RSSI to distance estimate using logarithmic path loss model
         
         Args:
             rssi: Received Signal Strength Indicator
-            tx_power: Transmit power at 1 meter (default -59 dBm)
+            tx_power: Transmit power at 1 meter (default -55 dBm)
             
         Returns:
             Estimated distance in meters
@@ -77,7 +101,7 @@ class User:
         
         # Calculate distance using path loss formula
         # Distance = 10^((TxPower - RSSI) / (10 * n)) where n = 2 for free space
-        distance = math.pow(10, (tx_power - rssi) / 20.0)
+        distance = math.pow(10, (tx_power - rssi) / 30 )
         
         # Limit distance to reasonable range (0.1m to 100m)
         distance = max(0.1, min(distance, 100.0))
