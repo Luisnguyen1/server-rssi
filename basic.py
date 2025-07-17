@@ -7,8 +7,8 @@ from filterpy.kalman import KalmanFilter
 
 # === Cấu hình ===
 CHAR_UUID = "e8e0f616-ff20-48d1-8f60-18f495a44385"
-TX_POWER = -59
-ENV_FACTOR = 2.0  # Hệ số môi trường
+TX_POWER = -52
+ENV_FACTOR = 2.7  # Hệ số môi trường
 
 # === Load beacon từ file JSON ===
 with open("bencons.json", "r") as f:
