@@ -86,12 +86,22 @@ def start_beacon_connections():
     
     # Create and start connections for all beacons
     for beacon_info in config['beacons']:
-        beacon_conn = BeaconConnection(beacon_info)
-        # Override the delegate class
-        beacon_conn.delegate_class = WebBeaconDelegate
-        beacon_connections.append(beacon_conn)
-        beacon_conn.start_thread()
-        time.sleep(0.5)  # Small delay between connections
+        try:
+            beacon_conn = BeaconConnection(beacon_info)
+            # Tạo một class mới kế thừa WebBeaconDelegate
+            class CustomBeaconDelegate(WebBeaconDelegate):
+                def __init__(self, beacon_mac):
+                    super().__init__(beacon_mac)
+            
+            # Override the delegate class
+            beacon_conn.delegate_class = CustomBeaconDelegate
+            beacon_connections.append(beacon_conn)
+            beacon_conn.start_thread()
+            time.sleep(1)  # Tăng delay giữa các kết nối
+            
+        except Exception as e:
+            print(f"Error connecting to beacon {beacon_info['mac']}: {e}")
+            continue
     
     return beacon_connections
 
