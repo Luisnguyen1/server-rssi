@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RSSI Fingerprinting</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(10, 40px);
+            gap: 1px;
+            background-color: #eee;
+            padding: 10px;
+            margin: 20px 0;
+        }
+        .grid-cell {
+            width: 40px;
+            height: 40px;
+            background-color: white;
+            border: 1px solid #ddd;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .grid-cell:hover {
+            background-color: #f0f0f0;
+        }
+        .grid-cell.selected {
+            background-color: #007bff;
+            color: white;
+        }
+        .beacon-marker {
+            background-color: #ffc107;
+            color: black;
+            font-weight: bold;
+        }
+        .fingerprint-marker {
+            background-color: #28a745;
+            color: white;
+            font-size: 0.8em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <h1>📍 RSSI Fingerprinting Collection</h1>
+        
+        <div class="row mt-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">👤 User Selection & Location</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="userId" class="form-label">User ID:</label>
+                            <input type="text" class="form-control" id="userId" value="user_1">
+                        </div>
+                        <div class="row">
+                            <div class="col-6">
+                                <label for="coordX" class="form-label">X Coordinate:</label>
+                                <input type="number" class="form-control" id="coordX" readonly>
+                            </div>
+                            <div class="col-6">
+                                <label for="coordY" class="form-label">Y Coordinate:</label>
+                                <input type="number" class="form-control" id="coordY" readonly>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card mt-3">
+                    <div class="card-header">
+                        <h5 class="mb-0">🗺️ Location Grid</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="grid-container" id="locationGrid"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">📊 Current RSSI Values</h5>
+                    </div>
+                    <div class="card-body">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>Beacon MAC</th>
+                                    <th>RSSI (dBm)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="rssiTable">
+                            </tbody>
+                        </table>
+                        <button class="btn btn-primary" onclick="saveFingerprint()">
+                            💾 Save Fingerprint
+                        </button>
+                    </div>
+                </div>
+
+                <div class="card mt-3">
+                    <div class="card-header">
+                        <h5 class="mb-0">📝 Collected Fingerprints</h5>
+                    </div>
+                    <div class="card-body">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>User</th>
+                                    <th>X</th>
+                                    <th>Y</th>
+                                    <th>Beacons</th>
+                                </tr>
+                            </thead>
+                            <tbody id="fingerprintTable">
+                                {% for fp in fingerprints %}
+                                <tr>
+                                    <td>{{ loop.index }}</td>
+                                    <td>{{ fp.user_id }}</td>
+                                    <td>{{ fp.x }}</td>
+                                    <td>{{ fp.y }}</td>
+                                    <td>{{ fp.rssi | length }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.0.1/socket.io.min.js"></script>
+    <script>
+        const beacons = {{ beacons|tojson }};
+        const gridSize = 10;
+        let selectedCell = null;
+        
+        // Initialize Socket.IO
+        const socket = io();
+        
+        // Handle RSSI updates
+        socket.on('rssi_update', function(data) {
+            if (data.user_id === document.getElementById('userId').value) {
+                updateRssiTable();
+            }
+        });
+
+        // Create grid
+        function createGrid() {
+            const grid = document.getElementById('locationGrid');
+            grid.innerHTML = '';
+            
+            for (let y = gridSize - 1; y >= 0; y--) {
+                for (let x = 0; x < gridSize; x++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'grid-cell';
+                    cell.dataset.x = x;
+                    cell.dataset.y = y;
+                    
+                    // Check if this cell has a beacon
+                    const beacon = beacons.find(b => {
+                        const [bx, by] = b.toado.split(',').map(Number);
+                        return bx === x && by === y;
+                    });
+                    
+                    if (beacon) {
+                        cell.classList.add('beacon-marker');
+                        cell.title = `Beacon: ${beacon.mac}`;
+                        cell.textContent = '📡';
+                    }
+                    
+                    cell.addEventListener('click', () => selectCell(x, y, cell));
+                    grid.appendChild(cell);
+                }
+            }
+        }
+
+        // Select grid cell
+        function selectCell(x, y, cell) {
+            if (selectedCell) {
+                selectedCell.classList.remove('selected');
+            }
+            selectedCell = cell;
+            cell.classList.add('selected');
+            
+            document.getElementById('coordX').value = x;
+            document.getElementById('coordY').value = y;
+        }
+
+        // Update RSSI table
+        async function updateRssiTable() {
+            const userId = document.getElementById('userId').value;
+            const response = await fetch(`/api/current_rssi/${userId}`);
+            const rssiData = await response.json();
+            
+            const tbody = document.getElementById('rssiTable');
+            tbody.innerHTML = '';
+            
+            for (const [mac, rssi] of Object.entries(rssiData)) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${mac}</td>
+                    <td>${rssi} dBm</td>
+                `;
+                tbody.appendChild(tr);
+            }
+        }
+
+        // Save fingerprint
+        async function saveFingerprint() {
+            const userId = document.getElementById('userId').value;
+            const x = document.getElementById('coordX').value;
+            const y = document.getElementById('coordY').value;
+            
+            if (!x || !y) {
+                alert('Please select a location on the grid.');
+                return;
+            }
+            
+            const response = await fetch('/api/save_fingerprint', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    user_id: userId,
+                    x: parseFloat(x),
+                    y: parseFloat(y)
+                })
+            });
+            
+            const result = await response.json();
+            if (result.status === 'success') {
+                alert('Fingerprint saved successfully!');
+                location.reload(); // Refresh page to show new fingerprint
+            } else {
+                alert('Error saving fingerprint: ' + result.error);
+            }
+        }
+
+        // Initialize grid
+        createGrid();
+        
+        // Start periodic RSSI updates
+        setInterval(updateRssiTable, 1000);
+    </script>
+</body>
+</html>
