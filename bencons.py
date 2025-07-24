@@ -62,46 +62,41 @@ class BeaconConnection:
         self.thread = None
         
     def connect_and_listen(self):
-        """Connect to beacon and listen for notifications. Auto reconnect if disconnected."""
-        while True:
-            try:
-                self.disconnect()
-                print(f"[{self.mac}] Waiting 1s before connecting...")
-                time.sleep(1)
-                print(f"[{self.mac}] Connecting...")
-                self.peripheral = Peripheral(self.mac)
-                self.peripheral.setDelegate(BeaconDelegate(self.mac))
-                print(f"[{self.mac}] Searching for characteristic...")
-                char = self.peripheral.getCharacteristics(uuid=CHAR_UUID)[0]
-                if not char.supportsRead():
-                    print(f"[{self.mac}] This characteristic does not support reading, only notifications.")
-                print(f"[{self.mac}] Enabling notifications...")
-                self.peripheral.writeCharacteristic(char.getHandle() + 1, b'\x01\x00', withResponse=True)
-                print(f"[{self.mac}] Connected successfully. Listening for notifications...")
-                self.is_connected = True
-                while self.is_connected:
-                    try:
-                        notified = self.peripheral.waitForNotifications(1.0)
-                        if notified:
-                            continue
-                        # else: pass
-                    except BTLEException as e:
-                        print(f"[{self.mac}] Bluetooth error or disconnect: {e}. Will scan and reconnect...")
-                        break
-                    except Exception as e:
-                        print(f"[{self.mac}] Unexpected error in loop: {e}")
-                        time.sleep(0.5)
-                print(f"[{self.mac}] Lost connection, will scan and reconnect in 2s...")
-                time.sleep(2)
-            except BTLEException as e:
-                print(f"[{self.mac}] Bluetooth error: {e}. Will scan and reconnect in 2s...")
-                time.sleep(2)
-            except Exception as e:
-                print(f"[{self.mac}] Error: {e}. Will scan and reconnect in 2s...")
-                time.sleep(2)
-            finally:
-                self.disconnect()
-                self.peripheral = None
+        """Connect to beacon and listen for notifications"""
+        try:
+            print(f"[{self.mac}] Connecting...")
+            self.peripheral = Peripheral(self.mac)
+            self.peripheral.setDelegate(BeaconDelegate(self.mac))
+            
+            # Find the characteristic
+            print(f"[{self.mac}] Searching for characteristic...")
+            char = self.peripheral.getCharacteristics(uuid=CHAR_UUID)[0]
+            
+            if not char.supportsRead():
+                print(f"[{self.mac}] This characteristic does not support reading, only notifications.")
+            
+            # Enable notifications
+            print(f"[{self.mac}] Enabling notifications...")
+            self.peripheral.writeCharacteristic(char.getHandle() + 1, b'\x01\x00', withResponse=True)
+            
+            print(f"[{self.mac}] Connected successfully. Listening for notifications...")
+            self.is_connected = True
+            
+            # Listen for notifications
+            while self.is_connected:
+                if self.peripheral.waitForNotifications(1.0):
+                    continue
+                else:
+                    # Optional: uncomment the line below if you want to see "no notification" messages
+                    # print(f"[{self.mac}] No notification in the last second.")
+                    pass
+                    
+        except BTLEException as e:
+            print(f"[{self.mac}] Bluetooth error: {e}")
+        except Exception as e:
+            print(f"[{self.mac}] Error: {e}")
+        finally:
+            self.disconnect()
     
     def disconnect(self):
         """Disconnect from beacon"""
