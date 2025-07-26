@@ -170,16 +170,27 @@
         });
 
         // Create grid
-        function createGrid() {
+        async function createGrid() {
             const grid = document.getElementById('locationGrid');
             grid.innerHTML = '';
             
+            // Fetch current fingerprints from API
+            let fingerprints = [];
+            try {
+                const response = await fetch('/api/fingerprints');
+                fingerprints = await response.json();
+            } catch (error) {
+                console.log('Could not fetch fingerprints:', error);
+                // Fallback to server-side data
+                fingerprints = {{ fingerprints|tojson }};
+            }
+            
             // Create fingerprint count map
             const fpCounts = {};
-            {% for fp in fingerprints %}
-            const key = `${fp.location.x},${fp.location.y}`;
-            fpCounts[key] = (fpCounts[key] || 0) + 1;
-            {% endfor %}
+            fingerprints.forEach(fp => {
+                const key = `${fp.location.x},${fp.location.y}`;
+                fpCounts[key] = (fpCounts[key] || 0) + 1;
+            });
             
             for (let y = gridSize - 1; y >= 0; y--) {
                 for (let x = 0; x < gridSize; x++) {
@@ -264,23 +275,30 @@
                 return;
             }
             
-            const response = await fetch('/api/save_fingerprint', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    x: parseFloat(x),
-                    y: parseFloat(y)
-                })
-            });
-            
-            const result = await response.json();
-            if (result.status === 'success') {
-                alert('Fingerprint saved successfully!');
-                location.reload(); // Refresh page to show new fingerprint
-            } else {
-                alert('Error saving fingerprint: ' + result.error);
+            try {
+                const response = await fetch('/api/save_fingerprint', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        x: parseFloat(x),
+                        y: parseFloat(y)
+                    })
+                });
+                
+                const result = await response.json();
+                if (result.status === 'success') {
+                    alert('Fingerprint saved successfully!');
+                    // Refresh grid and fingerprint table instead of full page reload
+                    await createGrid();
+                    await updateFingerprintTable();
+                } else {
+                    alert('Error saving fingerprint: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Error saving fingerprint:', error);
+                alert('Network error occurred while saving fingerprint');
             }
         }
 
@@ -290,27 +308,64 @@
                 return;
             }
             
-            const response = await fetch('/api/fingerprints/clear', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
+            try {
+                const response = await fetch('/api/fingerprints/clear', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const result = await response.json();
+                if (result.status === 'success') {
+                    alert('All fingerprints cleared!');
+                    // Refresh grid and fingerprint table instead of full page reload
+                    await createGrid();
+                    await updateFingerprintTable();
+                } else {
+                    alert('Error clearing fingerprints');
                 }
-            });
-            
-            const result = await response.json();
-            if (result.status === 'success') {
-                alert('All fingerprints cleared!');
-                location.reload(); // Refresh page to update display
-            } else {
-                alert('Error clearing fingerprints');
+            } catch (error) {
+                console.error('Error clearing fingerprints:', error);
+                alert('Network error occurred while clearing fingerprints');
             }
         }
 
-        // Initialize grid
-        createGrid();
-        
-        // Start periodic RSSI updates
-        setInterval(updateRssiTable, 1000);
+        // Update fingerprint table
+        async function updateFingerprintTable() {
+            try {
+                const response = await fetch('/api/fingerprints');
+                const fingerprints = await response.json();
+                
+                const tbody = document.querySelector('#fingerprintTable');
+                tbody.innerHTML = '';
+                
+                fingerprints.forEach((fp, index) => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>${index + 1}</td>
+                        <td>${fp.timestamp}</td>
+                        <td>(${fp.location.x}, ${fp.location.y})</td>
+                        <td>${Object.keys(fp.readings).length}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (error) {
+                console.error('Error updating fingerprint table:', error);
+            }
+        }
+
+        // Initialize grid and start updates
+        async function initialize() {
+            await createGrid();
+            await updateFingerprintTable();
+            
+            // Start periodic RSSI updates
+            setInterval(updateRssiTable, 1000);
+        }
+
+        // Initialize when page loads
+        initialize();
     </script>
 </body>
 </html>
