@@ -4,22 +4,14 @@ import json
 import threading
 from bencons import BeaconConnection, BeaconDelegate
 import time
-import numpy as np
-from filterpy.kalman import KalmanFilter
+from datetime import datetime
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
 socketio = SocketIO(app)
 
-# Constants for RSSI to distance conversion
-TX_POWER = -55
-ENV_FACTOR = 2.8
-
-# Global dictionaries
-current_rssi = {}  # Store current RSSI values
-kalman_filters = {}  # Store Kalman filters for each beacon
-user_data = {}  # Store user distances to beacons
-user_positions = {}  # Store calculated user positions
+# Global variables
+current_rssi = {}  # Store current RSSI values for beacons
 data_lock = threading.Lock()
 
 # Load beacon configuration
@@ -33,132 +25,52 @@ try:
 except FileNotFoundError:
     fingerprints = []
 
+# Load existing fingerprints if file exists
+try:
+    with open('fingerprints.json', 'r') as f:
+        fingerprints = json.load(f)
+except FileNotFoundError:
+    fingerprints = []
+
 def save_fingerprints():
     """Save fingerprints to JSON file"""
     with open('fingerprints.json', 'w') as f:
         json.dump(fingerprints, f, indent=2)
 
-def create_kalman_filter():
-    kf = KalmanFilter(dim_x=2, dim_z=1)
-    kf.x = np.array([[0.0], [0.0]])  # [distance, velocity]
-    kf.F = np.array([[1., 1.], [0., 1.]])
-    kf.H = np.array([[1., 0.]])
-    kf.P *= 1000.
-    kf.R = 0.1
-    kf.Q = np.array([[0.01, 0.01], [0.01, 0.1]])
-    return kf
-
-def estimate_distance(rssi):
-    if rssi == 0:
-        return None
-    return 10 ** ((TX_POWER - rssi) / (10 * ENV_FACTOR))
-
-def trilaterate(positions, distances):
-    if len(positions) < 3:
-        return None, None
-    
-    (x1, y1), (x2, y2), (x3, y3) = positions[:3]
-    r1, r2, r3 = distances[:3]
-
-    A = 2*(x2 - x1)
-    B = 2*(y2 - y1)
-    C = r1**2 - r2**2 - x1**2 + x2**2 - y1**2 + y2**2
-
-    D = 2*(x3 - x2)
-    E = 2*(y3 - y2)
-    F = r2**2 - r3**2 - x2**2 + x3**2 - y2**2 + y3**2
-
-    denominator = A*E - B*D
-    if abs(denominator) < 1e-10:
-        return None, None
-
-    x = (C*E - F*B) / denominator
-    y = (A*F - C*D) / denominator
-    
-    accuracy = calculate_position_accuracy(positions[:3], distances[:3], (x, y))
-    
-    return (x, y), accuracy
-
-def calculate_position_accuracy(positions, distances, calculated_pos):
-    if not calculated_pos:
-        return 0
-    
-    x, y = calculated_pos
-    errors = []
-    
-    for (bx, by), expected_dist in zip(positions, distances):
-        actual_dist = np.sqrt((x - bx)**2 + (y - by)**2)
-        error = abs(actual_dist - expected_dist)
-        errors.append(error)
-    
-    avg_error = np.mean(errors)
-    accuracy = max(0, 100 - (avg_error * 10))
-    return round(accuracy, 1)
+def get_beacon_name(mac):
+    """Get beacon name/number from MAC address"""
+    for i, beacon in enumerate(config['beacons']):
+        if beacon['mac'] == mac:
+            return f'beacon{i+1}'
+    return mac
 
 class WebBeaconDelegate(BeaconDelegate):
     def handleNotification(self, cHandle, data):
         try:
             data_str = data.decode('utf-8')
-            parts = data_str.strip().split(':')
-            if len(parts) == 2:
-                user_id, rssi = parts
-                rssi = int(rssi)
+            # Parse RSSI value from data
+            try:
+                rssi = int(data_str.strip().split(':')[1])
+            except:
+                rssi = int(data_str)
 
-                # Create Kalman filter if not exists
-                if self.beacon_mac not in kalman_filters:
-                    kalman_filters[self.beacon_mac] = create_kalman_filter()
+            with data_lock:
+                # Update current RSSI value for this beacon
+                current_rssi[self.beacon_mac] = {
+                    'rssi': rssi,
+                    'timestamp': time.time()
+                }
+                
+                # Get beacon info for the UI
+                beacon_info = next((b for b in config['beacons'] if b['mac'] == self.beacon_mac), None)
+                beacon_location = beacon_info.get('toado', 'unknown') if beacon_info else 'unknown'
 
-                # Calculate distance using Kalman filter
-                raw_distance = estimate_distance(rssi)
-                if raw_distance is None:
-                    return
-
-                kf = kalman_filters[self.beacon_mac]
-                kf.predict()
-                kf.update(np.array([[raw_distance]]))
-                filtered_distance = kf.x[0, 0]
-
-                with data_lock:
-                    # Update current RSSI and distance
-                    if user_id not in user_data:
-                        user_data[user_id] = {}
-                    user_data[user_id][self.beacon_mac] = filtered_distance
-                    current_rssi[self.beacon_mac] = rssi
-
-                    # Calculate position if we have enough beacons
-                    coords = []
-                    dists = []
-                    for mac, dist in user_data[user_id].items():
-                        beacon_info = next((b for b in config['beacons'] if b['mac'] == mac), None)
-                        if beacon_info and 'toado' in beacon_info:
-                            try:
-                                x, y = map(float, beacon_info['toado'].split(','))
-                                coords.append((x, y))
-                                dists.append(dist)
-                            except:
-                                print(f"Invalid coordinates for beacon {mac}")
-
-                    if len(coords) >= 3:
-                        position, accuracy = trilaterate(coords, dists)
-                        if position:
-                            x, y = position
-                            timestamp = time.time()
-                            user_positions[user_id] = {
-                                'x': round(x, 2),
-                                'y': round(y, 2),
-                                'timestamp': timestamp,
-                                'accuracy': accuracy
-                            }
-
-                # Emit updates to connected clients
-                socketio.emit('position_update', {
-                    'user_id': user_id,
-                    'position': user_positions.get(user_id),
-                    'rssi': {
-                        'beacon_mac': self.beacon_mac,
-                        'rssi': rssi,
-                        'distance': filtered_distance
-                    }
+                # Emit update to connected clients
+                socketio.emit('rssi_update', {
+                    'beacon_mac': self.beacon_mac,
+                    'rssi': rssi,
+                    'location': beacon_location,
+                    'timestamp': datetime.now().strftime('%H:%M:%S')
                 })
 
         except Exception as e:
@@ -172,51 +84,51 @@ def index():
 
 @app.route('/api/current_rssi')
 def get_current_rssi():
-    return jsonify(current_rssi)
-
-@app.route('/api/positions')
-def get_positions():
-    """Get all user positions"""
+    """Get current RSSI values for all beacons"""
     with data_lock:
-        return jsonify(user_positions)
-
-@app.route('/api/user_data/<user_id>')
-def get_user_data(user_id):
-    """Get detailed data for a specific user"""
-    with data_lock:
-        if user_id not in user_data:
-            return jsonify({'error': 'User not found'}), 404
-            
-        return jsonify({
-            'user_id': user_id,
-            'position': user_positions.get(user_id),
-            'distances': user_data[user_id],
-            'rssi_values': {mac: current_rssi.get(mac) 
-                          for mac in user_data[user_id].keys()}
-        })
+        formatted_rssi = {}
+        for mac, data in current_rssi.items():
+            beacon_name = get_beacon_name(mac)
+            formatted_rssi[beacon_name] = {
+                'mac': mac,
+                'rssi': data['rssi'],
+                'timestamp': data['timestamp']
+            }
+        return jsonify(formatted_rssi)
 
 @app.route('/api/save_fingerprint', methods=['POST'])
 def save_fingerprint():
+    """Save a new fingerprint with location and current RSSI values"""
     data = request.json
     x = float(data['x'])
     y = float(data['y'])
     
-    if not current_rssi:
-        return jsonify({'error': 'No RSSI data available'}), 400
-    
-    # Create fingerprint record with coordinates, RSSI values and calculated distances
-    fingerprint = {
-        'x': x,
-        'y': y,
-        'rssi': current_rssi.copy(),
-        'distances': {mac: estimate_distance(rssi) 
-                     for mac, rssi in current_rssi.items()}
-    }
-    
-    fingerprints.append(fingerprint)
-    save_fingerprints()
-    
-    return jsonify({'status': 'success', 'fingerprint': fingerprint})
+    with data_lock:
+        if not current_rssi:
+            return jsonify({'error': 'No RSSI data available'}), 400
+        
+        # Create fingerprint with timestamp, location and RSSI values
+        fingerprint = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'location': {'x': x, 'y': y},
+            'readings': {}
+        }
+        
+        # Add RSSI readings for each beacon
+        for mac, data in current_rssi.items():
+            beacon_name = get_beacon_name(mac)
+            fingerprint['readings'][beacon_name] = {
+                'mac': mac,
+                'rssi': data['rssi']
+            }
+        
+        fingerprints.append(fingerprint)
+        save_fingerprints()
+        
+        return jsonify({
+            'status': 'success',
+            'fingerprint': fingerprint
+        })
 
 def start_beacon_connections():
     """Start connections to all beacons"""
