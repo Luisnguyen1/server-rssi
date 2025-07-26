@@ -174,6 +174,9 @@
             const grid = document.getElementById('locationGrid');
             grid.innerHTML = '';
             
+            // Reset selected cell since we're recreating the grid
+            selectedCell = null;
+            
             // Fetch current fingerprints from API
             let fingerprints = [];
             try {
@@ -182,7 +185,11 @@
             } catch (error) {
                 console.log('Could not fetch fingerprints:', error);
                 // Fallback to server-side data
-                fingerprints = {{ fingerprints|tojson }};
+                try {
+                    fingerprints = {{ fingerprints|tojson }};
+                } catch (e) {
+                    fingerprints = [];
+                }
             }
             
             // Create fingerprint count map
@@ -221,22 +228,45 @@
                         cell.appendChild(countBadge);
                     }
                     
-                    cell.addEventListener('click', () => selectCell(x, y, cell));
+                    // Add click event listener using dataset attributes
+                    cell.addEventListener('click', function(event) {
+                        const clickedX = parseInt(event.target.dataset.x);
+                        const clickedY = parseInt(event.target.dataset.y);
+                        console.log(`Grid cell clicked: (${clickedX}, ${clickedY})`);
+                        selectCell(clickedX, clickedY, event.target);
+                    });
+                    
                     grid.appendChild(cell);
                 }
+            }
+            
+            // Clear coordinate inputs if no cell is selected
+            if (!selectedCell) {
+                document.getElementById('coordX').value = '';
+                document.getElementById('coordY').value = '';
             }
         }
 
         // Select grid cell
         function selectCell(x, y, cell) {
-            if (selectedCell) {
+            console.log(`Selecting cell at (${x}, ${y})`);
+            
+            // Remove selection from previous cell
+            if (selectedCell && selectedCell.classList) {
                 selectedCell.classList.remove('selected');
             }
-            selectedCell = cell;
-            cell.classList.add('selected');
             
+            // Set new selected cell
+            selectedCell = cell;
+            if (cell && cell.classList) {
+                cell.classList.add('selected');
+            }
+            
+            // Update coordinate inputs
             document.getElementById('coordX').value = x;
             document.getElementById('coordY').value = y;
+            
+            console.log(`Selected coordinates: (${x}, ${y})`);
         }
 
         // Update RSSI table
@@ -270,6 +300,8 @@
             const x = document.getElementById('coordX').value;
             const y = document.getElementById('coordY').value;
             
+            console.log(`Attempting to save fingerprint at (${x}, ${y})`);
+            
             if (!x || !y) {
                 alert('Please select a location on the grid.');
                 return;
@@ -288,11 +320,21 @@
                 });
                 
                 const result = await response.json();
+                console.log('Save fingerprint result:', result);
+                
                 if (result.status === 'success') {
                     alert('Fingerprint saved successfully!');
-                    // Refresh grid and fingerprint table instead of full page reload
+                    
+                    // Store current selection before recreating grid
+                    const currentX = x;
+                    const currentY = y;
+                    
+                    // Refresh grid and fingerprint table
+                    console.log('Refreshing grid and table...');
                     await createGrid();
                     await updateFingerprintTable();
+                    
+                    console.log('Grid and table refreshed');
                 } else {
                     alert('Error saving fingerprint: ' + result.error);
                 }
@@ -357,15 +399,31 @@
 
         // Initialize grid and start updates
         async function initialize() {
+            console.log('Initializing application...');
             await createGrid();
             await updateFingerprintTable();
             
             // Start periodic RSSI updates
             setInterval(updateRssiTable, 1000);
+            
+            console.log('Application initialized');
+        }
+
+        // Test function to check grid functionality
+        function testGrid() {
+            console.log('Testing grid...');
+            console.log('Grid element:', document.getElementById('locationGrid'));
+            console.log('Grid cells count:', document.querySelectorAll('.grid-cell').length);
+            console.log('Selected cell:', selectedCell);
+            console.log('CoordX value:', document.getElementById('coordX').value);
+            console.log('CoordY value:', document.getElementById('coordY').value);
         }
 
         // Initialize when page loads
         initialize();
+        
+        // Make test function available globally for debugging
+        window.testGrid = testGrid;
     </script>
 </body>
 </html>
