@@ -48,16 +48,24 @@ class WebBeaconDelegate(DefaultDelegate):
     def handleNotification(self, cHandle, data):
         try:
             data_str = data.decode('utf-8')
-            print(f"[{self.mac}] Received: {data_str}")
+            print(f"[{self.mac}] Raw received: {data_str}")
             
             # Parse data - format could be "user_id:rssi" or just "rssi"
             if ':' in data_str:
                 # Format: user_id:rssi - take only rssi part for fingerprinting
                 parts = data_str.strip().split(':')
-                rssi = int(parts[1])
+                if len(parts) >= 2:
+                    rssi = int(parts[1])
+                else:
+                    print(f"[{self.mac}] Invalid format with colon: {data_str}")
+                    return
             else:
                 # Format: just rssi
-                rssi = int(data_str.strip())
+                try:
+                    rssi = int(data_str.strip())
+                except ValueError:
+                    print(f"[{self.mac}] Cannot parse RSSI from: {data_str}")
+                    return
 
             with data_lock:
                 # Update current RSSI value for this beacon
@@ -71,7 +79,7 @@ class WebBeaconDelegate(DefaultDelegate):
                 beacon_location = beacon_info.get('toado', 'unknown') if beacon_info else 'unknown'
                 beacon_name = get_beacon_name(self.mac)
 
-                print(f"[{beacon_name}] RSSI: {rssi} dBm")
+                print(f"[{beacon_name}] ✅ RSSI: {rssi} dBm (location: {beacon_location})")
 
                 # Emit update to connected clients via SocketIO
                 socketio.emit('rssi_update', {
@@ -83,7 +91,9 @@ class WebBeaconDelegate(DefaultDelegate):
                 })
 
         except Exception as e:
-            print(f"[{self.mac}] Error in notification handler: {e}")
+            print(f"[{self.mac}] ❌ Error in notification handler: {e}")
+            import traceback
+            traceback.print_exc()
 
 class BeaconConnection:
     def __init__(self, beacon_info):
@@ -134,61 +144,102 @@ def index():
                          beacons=config['beacons'],
                          fingerprints=fingerprints)
 
+@app.route('/test')
+def test():
+    """Simple test endpoint"""
+    return jsonify({
+        'status': 'Server is running',
+        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'beacons_configured': len(config['beacons'])
+    })
+
 @app.route('/api/current_rssi')
 def get_current_rssi():
     """Get current RSSI values for all beacons"""
     with data_lock:
         formatted_rssi = {}
+        current_time = time.time()
         for mac, data in current_rssi.items():
             beacon_name = get_beacon_name(mac)
+            age = current_time - data['timestamp']
             formatted_rssi[beacon_name] = {
                 'mac': mac,
                 'rssi': data['rssi'],
-                'timestamp': data['timestamp']
+                'timestamp': data['timestamp'],
+                'age_seconds': round(age, 1)
             }
         return jsonify(formatted_rssi)
+
+@app.route('/api/debug')
+def debug_info():
+    """Debug endpoint to check server status"""
+    with data_lock:
+        return jsonify({
+            'beacons_configured': len(config['beacons']),
+            'beacons_with_data': len(current_rssi),
+            'current_rssi': current_rssi,
+            'fingerprints_count': len(fingerprints),
+            'server_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
 
 @app.route('/api/save_fingerprint', methods=['POST'])
 def save_fingerprint():
     """Save a new fingerprint with location and current RSSI values"""
-    data = request.json
-    x = float(data['x'])
-    y = float(data['y'])
-    
-    with data_lock:
-        if not current_rssi:
-            return jsonify({'error': 'No RSSI data available'}), 400
+    try:
+        data = request.json
+        print(f"Received fingerprint request: {data}")
         
-        # Create fingerprint with timestamp, location and RSSI values
-        fingerprint = {
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'location': {'x': x, 'y': y},
-            'readings': {}
-        }
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+            
+        x = float(data.get('x', 0))
+        y = float(data.get('y', 0))
         
-        # Add RSSI readings for each beacon that has recent data
-        for mac, rssi_data in current_rssi.items():
-            # Only include data that's not older than 10 seconds
-            age = time.time() - rssi_data['timestamp']
-            if age <= 10:
-                beacon_name = get_beacon_name(mac)
-                fingerprint['readings'][beacon_name] = {
-                    'mac': mac,
-                    'rssi': rssi_data['rssi']
-                }
-        
-        if not fingerprint['readings']:
-            return jsonify({'error': 'No recent RSSI data available (older than 10 seconds)'}), 400
-        
-        fingerprints.append(fingerprint)
-        save_fingerprints()
-        
-        print(f"Saved fingerprint at ({x}, {y}) with {len(fingerprint['readings'])} beacon readings")
-        
-        return jsonify({
-            'status': 'success',
-            'fingerprint': fingerprint
-        })
+        with data_lock:
+            print(f"Current RSSI data: {current_rssi}")
+            
+            if not current_rssi:
+                return jsonify({'error': 'No RSSI data available. Make sure beacons are connected and sending data.'}), 400
+            
+            # Create fingerprint with timestamp, location and RSSI values
+            fingerprint = {
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'location': {'x': x, 'y': y},
+                'readings': {}
+            }
+            
+            # Add RSSI readings for each beacon that has recent data
+            current_time = time.time()
+            for mac, rssi_data in current_rssi.items():
+                age = current_time - rssi_data['timestamp']
+                print(f"Beacon {mac}: age = {age:.1f}s")
+                
+                # Increase timeout to 30 seconds for more flexibility
+                if age <= 30:
+                    beacon_name = get_beacon_name(mac)
+                    fingerprint['readings'][beacon_name] = {
+                        'mac': mac,
+                        'rssi': rssi_data['rssi']
+                    }
+                else:
+                    print(f"Beacon {mac} data too old: {age:.1f}s")
+            
+            if not fingerprint['readings']:
+                return jsonify({'error': f'No recent RSSI data available. All data older than 30 seconds. Current beacons: {list(current_rssi.keys())}'}), 400
+            
+            fingerprints.append(fingerprint)
+            save_fingerprints()
+            
+            print(f"✅ Saved fingerprint at ({x}, {y}) with {len(fingerprint['readings'])} beacon readings")
+            
+            return jsonify({
+                'status': 'success',
+                'fingerprint': fingerprint
+            })
+            
+    except Exception as e:
+        print(f"❌ Error in save_fingerprint: {e}")
+        return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 @app.route('/api/fingerprints')
 def get_fingerprints():
