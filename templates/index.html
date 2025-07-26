@@ -73,6 +73,9 @@
                         <button class="btn btn-primary" onclick="saveFingerprint()">
                             💾 Save Fingerprint
                         </button>
+                        <button class="btn btn-success ms-2" onclick="exportFingerprints()">
+                            📥 Export JSON
+                        </button>
                         <button class="btn btn-secondary ms-2" onclick="clearFingerprints()">
                             🗑️ Clear All
                         </button>
@@ -91,6 +94,7 @@
                                     <th>Time</th>
                                     <th>Location</th>
                                     <th>Beacons</th>
+                                    <th>RSSI Values</th>
                                 </tr>
                             </thead>
                             <tbody id="fingerprintTable">
@@ -222,6 +226,26 @@
             }
         }
 
+        // Export fingerprints to JSON file
+        function exportFingerprints() {
+            try {
+                // Create a link to download the JSON file
+                const link = document.createElement('a');
+                link.href = '/api/fingerprints/export';
+                link.download = `fingerprints_${new Date().toISOString().slice(0,19).replace(/:/g, '-')}.json`;
+                
+                // Trigger download
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                console.log('Export initiated');
+            } catch (error) {
+                console.error('Error exporting fingerprints:', error);
+                alert('Error occurred while exporting fingerprints');
+            }
+        }
+
         // Update fingerprint table
         async function updateFingerprintTable() {
             try {
@@ -232,15 +256,23 @@
                 tbody.innerHTML = '';
                 
                 fingerprints.forEach((fp, index) => {
+                    // Create RSSI values string
+                    const rssiValues = Object.entries(fp.readings)
+                        .map(([beacon, data]) => `${beacon}: ${data.rssi}dBm`)
+                        .join(', ');
+                    
                     const tr = document.createElement('tr');
                     tr.innerHTML = `
                         <td>${index + 1}</td>
                         <td>${fp.timestamp}</td>
                         <td>(${fp.location.x}, ${fp.location.y})</td>
                         <td>${Object.keys(fp.readings).length}</td>
+                        <td><small>${rssiValues}</small></td>
                     `;
                     tbody.appendChild(tr);
                 });
+                
+                console.log(`Updated fingerprint table with ${fingerprints.length} entries`);
             } catch (error) {
                 console.error('Error updating fingerprint table:', error);
             }

@@ -246,6 +246,33 @@ def get_fingerprints():
     """Get all saved fingerprints"""
     return jsonify(fingerprints)
 
+@app.route('/api/fingerprints/export')
+def export_fingerprints():
+    """Export fingerprints as JSON file download"""
+    from flask import make_response
+    import json
+    from datetime import datetime
+    
+    # Create export data with metadata
+    export_data = {
+        'export_info': {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'total_fingerprints': len(fingerprints),
+            'beacon_configuration': config['beacons']
+        },
+        'fingerprints': fingerprints
+    }
+    
+    # Create JSON response
+    json_str = json.dumps(export_data, indent=2, ensure_ascii=False)
+    
+    # Create response with proper headers for file download
+    response = make_response(json_str)
+    response.headers['Content-Type'] = 'application/json'
+    response.headers['Content-Disposition'] = f'attachment; filename=fingerprints_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+    
+    return response
+
 @app.route('/api/fingerprints/clear', methods=['POST'])
 def clear_fingerprints():
     """Clear all fingerprints"""
